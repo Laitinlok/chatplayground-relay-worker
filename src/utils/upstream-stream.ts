@@ -81,7 +81,9 @@ function safeParseStringArray(json: string): readonly string[] | null {
 /** Markdown sources block appended at the end of an assistant message. */
 export function formatCitations(citations: readonly string[]): string {
   if (citations.length === 0) return "";
-  const lines = citations.map((url, i) => `${i + 1}. ${url}`);
+  // Wrap each URL as a Markdown link so renderers that don't autolink bare
+  // URLs still produce a clickable Sources list. Visible text stays the URL.
+  const lines = citations.map((url, i) => `${i + 1}. [${url}](${url})`);
   return `\n\n---\n**Sources**\n\n${lines.join("\n")}`;
 }
 
