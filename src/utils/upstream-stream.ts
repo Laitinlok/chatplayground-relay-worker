@@ -2,6 +2,7 @@ import type {
   ChatCompletionChunk,
   ChatCompletionChunkDelta,
 } from "../types/openai";
+import { tryParseRelayToolCall } from "./tool-shim";
 
 // chatplayground appends `CHAT_ID:<cuid>` at the very end of the stream as a
 // sentinel. CUID format: `c` + ≥20 chars of [a-z0-9]. We strip it before
@@ -196,4 +197,88 @@ function flushBoundary(pending: string): number {
   if (citIdx >= 0) return citIdx;
   if (cidIdx >= 0) return cidIdx;
   return Math.max(0, pending.length - HOLDBACK_CHARS);
+}
+
+
+interface ToolAwareChunkMeta {
+  id: string;
+  model: string;
+  created: number;
+  onChatId?: (chatId: string) => void;
+}
+
+/**
+ * Tool-aware variant of streamUpstreamAsOpenAI. Buffers the entire response
+ * (no incremental flush) so it can detect a full relay_tool_call JSON
+ * envelope before deciding whether to emit tool_calls or plain content.
+ * Only used when the request included `tools`.
+ */
+export function streamUpstreamWithToolShim(
+  body: ReadableStream<Uint8Array>,
+  meta: ToolAwareChunkMeta,
+): ReadableStream<Uint8Array> {
+  const encoder = new TextEncoder();
+  const decoder = new TextDecoder();
+
+  function sse(
+    delta: ChatCompletionChunkDelta,
+    finishReason: "stop" | "tool_calls" | null = null,
+  ): Uint8Array {
+    const chunk: ChatCompletionChunk = {
+      id: meta.id,
+      object: "chat.completion.chunk",
+      created: meta.created,
+      model: meta.model,
+      choices: [{ index: 0, delta, finish_reason: finishReason }],
+    };
+    return encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`);
+  }
+
+  return new ReadableStream({
+    async start(controller) {
+      const reader = body.getReader();
+      let buf = "";
+
+      try {
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          if (value) buf += decoder.decode(value, { stream: true });
+        }
+        buf += decoder.decode();
+
+        const { content, chatId, citations } = parseTrailers(buf);
+        if (chatId) meta.onChatId?.(chatId);
+
+        const toolCall = tryParseRelayToolCall(content);
+
+        if (toolCall) {
+          controller.enqueue(
+            sse({
+              role: "assistant",
+              tool_calls: [
+                {
+                  index: 0,
+                  id: toolCall.id,
+                  type: "function",
+                  function: toolCall.function,
+                },
+              ],
+            }),
+          );
+          controller.enqueue(sse({}, "tool_calls"));
+        } else {
+          controller.enqueue(sse({ role: "assistant" }));
+          const sources = formatCitations(citations);
+          controller.enqueue(sse({ content: content + sources }));
+          controller.enqueue(sse({}, "stop"));
+        }
+
+        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+        controller.close();
+      } catch (err) {
+        controller.error(err);
+      }
+    },
+  });
 }

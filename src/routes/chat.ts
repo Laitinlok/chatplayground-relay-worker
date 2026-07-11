@@ -24,7 +24,13 @@ import {
   formatCitations,
   inlineCitationLinks,
   streamUpstreamAsOpenAI,
+  streamUpstreamWithToolShim,
 } from "../utils/upstream-stream";
+import {
+  hasTools,
+  injectToolPrompt,
+  tryParseRelayToolCall,
+} from "../utils/tool-shim";
 
 const chat = new Hono<{ Bindings: Env; Variables: Variables }>();
 
@@ -78,6 +84,15 @@ chat.post("/v1/chat/completions", async (c) => {
     }
   }
 
+  // Prompt-injection tool-calling shim: chatplayground's upstream has no
+  // native tool support, so when the caller sends `tools`, rewrite the
+  // system prompt to ask for a structured JSON envelope instead, and parse
+  // that envelope back into OpenAI tool_calls on the way out.
+  const toolsRequested = hasTools(body.tools);
+  if (toolsRequested) {
+    body.messages = injectToolPrompt(body.messages, body.tools!, body.tool_choice);
+  }
+
   const { endpoint, body: upstreamBody } = buildUpstreamRequest(body, model);
 
 
@@ -99,14 +114,24 @@ chat.post("/v1/chat/completions", async (c) => {
   const created = Math.floor(Date.now() / 1000);
 
   if (body.stream) {
-    const sse = streamUpstreamAsOpenAI(upstream.body, {
-      id,
-      model: model.id,
-      created,
-      onChatId: (chatId) => {
-        void saveCachedChatId(c.env, cacheKey, chatId);
-      },
-    });
+    const onChatId = (chatId: string) => {
+      void saveCachedChatId(c.env, cacheKey, chatId);
+    };
+
+    const sse = toolsRequested
+      ? streamUpstreamWithToolShim(upstream.body, {
+          id,
+          model: model.id,
+          created,
+          onChatId,
+        })
+      : streamUpstreamAsOpenAI(upstream.body, {
+          id,
+          model: model.id,
+          created,
+          onChatId,
+        });
+
     return new Response(sse, {
       status: 200,
       headers: {
@@ -120,6 +145,26 @@ chat.post("/v1/chat/completions", async (c) => {
 
   if (chatId) {
     await saveCachedChatId(c.env, cacheKey, chatId);
+  }
+
+  const toolCall = toolsRequested ? tryParseRelayToolCall(rawContent) : null;
+
+  if (toolCall) {
+    const toolResponse: ChatCompletionResponse = {
+      id,
+      object: "chat.completion",
+      created,
+      model: model.id,
+      choices: [
+        {
+          index: 0,
+          message: { role: "assistant", content: null, tool_calls: [toolCall] },
+          finish_reason: "tool_calls",
+        },
+      ],
+      usage: estimateUsage(body.messages, rawContent),
+    };
+    return Response.json(toolResponse);
   }
 
   // Non-streaming path: inline-rewrite [N] citation markers as Markdown links
