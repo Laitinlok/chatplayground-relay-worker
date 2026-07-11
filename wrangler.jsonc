@@ -17,13 +17,14 @@
     "UPSTREAM_ORIGIN": "https://web.chatplayground.ai",
     "UPSTREAM_REFERER": "https://web.chatplayground.ai/",
     "UPSTREAM_UPLOAD_URL": "https://temp-file-host.chatplayground.ai/upload"
-  }
+  },
 
   // KV namespaces (model cache + rate limiter) — uncomment + fill IDs
   // after running `wrangler kv namespace create MODEL_CACHE` etc.
   //
-  // "kv_namespaces": [
-  //   { "binding": "MODEL_CACHE", "id": "" },
-  //   { "binding": "RATE_LIMIT", "id": "" }
-  // ]
+   "kv_namespaces": [
+     { "binding": "MODEL_CACHE", "id": "local-placeholder" },
+     { "binding": "RATE_LIMIT", "id": "local-placeholder" },
+     { "binding": "CHAT_CACHE", "id": "local-placeholder" }
+   ]
 }

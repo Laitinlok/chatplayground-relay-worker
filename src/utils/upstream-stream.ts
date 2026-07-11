@@ -111,6 +111,7 @@ interface ChunkMeta {
   id: string;
   model: string;
   created: number;
+  onChatId?: (chatId: string) => void;
 }
 
 /**

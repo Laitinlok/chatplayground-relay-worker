@@ -28,6 +28,22 @@ import {
 
 const chat = new Hono<{ Bindings: Env; Variables: Variables }>();
 
+const CHAT_CACHE_TTL_SECONDS = 60 * 60 * 24 * 7; // 7 days
+
+function chatCacheKey(clerkUserId: string, modelId: string, conversationId?: string): string {
+  return `chat:${conversationId ?? `${clerkUserId}:${modelId}`}`;
+}
+
+async function loadCachedChatId(env: Env, key: string): Promise<string | null> {
+  if (!env.CHAT_CACHE) return null;
+  return env.CHAT_CACHE.get(key);
+}
+
+async function saveCachedChatId(env: Env, key: string, chatId: string): Promise<void> {
+  if (!env.CHAT_CACHE) return;
+  await env.CHAT_CACHE.put(key, chatId, { expirationTtl: CHAT_CACHE_TTL_SECONDS });
+}
+
 chat.post("/v1/chat/completions", async (c) => {
   const body = (await c.req.json().catch(() => null)) as
     | ChatCompletionRequest
@@ -47,8 +63,23 @@ chat.post("/v1/chat/completions", async (c) => {
   const model = findModel(body.model, registry);
   if (!model) throw modelNotFound(body.model);
 
-  const { endpoint, body: upstreamBody } = buildUpstreamRequest(body, model);
   const clerkUserId = c.get("clerkUserId");
+
+  // Reuse a prior upstream chat when the client hasn't explicitly set `user`
+  // and there's a cached chatId for this conversation. This avoids spending
+  // a brand-new chatplayground chat (and quota) on every single request.
+  const conversationId = c.req.header("x-conversation-id") ?? undefined;
+  const cacheKey = chatCacheKey(clerkUserId, model.id, conversationId);
+
+  if (!body.user) {
+    const cachedChatId = await loadCachedChatId(c.env, cacheKey);
+    if (cachedChatId) {
+      body.user = cachedChatId;
+    }
+  }
+
+  const { endpoint, body: upstreamBody } = buildUpstreamRequest(body, model);
+
 
   const upstream = await fetch(endpointUrl(endpoint, c.env.UPSTREAM_CHAT_URL), {
     method: "POST",
@@ -72,6 +103,9 @@ chat.post("/v1/chat/completions", async (c) => {
       id,
       model: model.id,
       created,
+      onChatId: (chatId) => {
+        void saveCachedChatId(c.env, cacheKey, chatId);
+      },
     });
     return new Response(sse, {
       status: 200,
@@ -83,6 +117,10 @@ chat.post("/v1/chat/completions", async (c) => {
   }
 
   const { content: rawContent, citations } = await collectUpstream(upstream.body);
+
+  if (chatId) {
+    await saveCachedChatId(c.env, cacheKey, chatId);
+  }
 
   // Non-streaming path: inline-rewrite [N] citation markers as Markdown links
   // and append a sources block. Usage stays based on raw model output so the

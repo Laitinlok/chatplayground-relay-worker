@@ -15,6 +15,9 @@ export interface Env {
   // KV bindings (optional — discovery falls back to SEED_MODELS without them)
   MODEL_CACHE?: KVNamespace;
   RATE_LIMIT?: KVNamespace;
+  // Chat-session cache (optional — enables upstream chat continuity so the
+  // relay doesn't spend a fresh chatplayground chat quota on every request).
+  CHAT_CACHE?: KVNamespace;
 }
 
 // Hono context variables populated by middleware.
