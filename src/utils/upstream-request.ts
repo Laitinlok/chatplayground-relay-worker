@@ -15,10 +15,42 @@ export function buildUpstreamRequest(
   // chatplayground accepts the same content shape as OpenAI (string or
   // ContentPart[]), so we pass `content` through unchanged. The only
   // role normalization: collapse "tool" → "user" (no endpoint has a tool role).
-  const messages: UpstreamMessage[] = req.messages.map((msg) => ({
-    role: msg.role === "tool" ? "user" : msg.role,
-    content: msg.content,
-  }));
+  //
+  // chatplayground also has no concept of `tool_calls`: an assistant
+  // message that only carries tool_calls has `content: null`, which the
+  // upstream Azure/perplexity/lmsys endpoints reject outright ("400 Invalid
+  // value for 'content': expected a string, got null"). Fold tool_calls and
+  // tool-role results into plain text instead of dropping/nulling them.
+  const messages: UpstreamMessage[] = req.messages.map((msg) => {
+    const role = msg.role === "tool" ? "user" : msg.role;
+
+    function flattenContent(content: unknown): string {
+      if (typeof content === "string") return content;
+      if (Array.isArray(content)) {
+        return content
+          .filter((p: any) => p?.type === "text")
+          .map((p: any) => p.text)
+          .join("\n");
+      }
+      return "";
+    }
+
+    if (msg.role === "assistant" && msg.tool_calls?.length) {
+      const calls = msg.tool_calls
+        .map((tc) => `Called ${tc.function.name}(${tc.function.arguments})`)
+        .join("; ");
+      const flat = flattenContent(msg.content).trim();
+      return { role, content: flat.length > 0 ? flat : calls };
+    }
+
+    if (msg.role === "tool") {
+      const result = flattenContent(msg.content).trim();
+      return { role, content: `Tool result: ${result || "(no result returned)"}` };
+    }
+
+    const flat = flattenContent(msg.content);
+    return { role, content: flat.length > 0 ? flat : (typeof msg.content === "string" ? msg.content : "") };
+  });
 
   // OpenAI `metadata.save` extension → !noSave. Default: don't pollute the
   // caller's chatplayground history with API traffic (noSave=true).

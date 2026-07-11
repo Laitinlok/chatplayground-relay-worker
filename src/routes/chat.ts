@@ -95,7 +95,7 @@ chat.post("/v1/chat/completions", async (c) => {
 
   const { endpoint, body: upstreamBody } = buildUpstreamRequest(body, model);
 
-
+  console.log("UPSTREAM BODY:", JSON.stringify(upstreamBody));
   const upstream = await fetch(endpointUrl(endpoint, c.env.UPSTREAM_CHAT_URL), {
     method: "POST",
     headers: buildUpstreamHeaders(clerkUserId, c.env),
@@ -141,7 +141,7 @@ chat.post("/v1/chat/completions", async (c) => {
     });
   }
 
-  const { content: rawContent, citations } = await collectUpstream(upstream.body);
+  const { content: rawContent, citations, chatId } = await collectUpstream(upstream.body);
 
   if (chatId) {
     await saveCachedChatId(c.env, cacheKey, chatId);
@@ -215,6 +215,7 @@ function estimateUsage(
 
 function textChars(content: OpenAIMessage["content"]): number {
   if (typeof content === "string") return content.length;
+  if (!Array.isArray(content)) return 0;
   let n = 0;
   for (const part of content) {
     if (part.type === "text") n += part.text.length;
