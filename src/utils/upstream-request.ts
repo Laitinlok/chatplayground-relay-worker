@@ -2,6 +2,8 @@ import type { UpstreamEndpoint } from "../constants/endpoints";
 import type { ModelEntry } from "../constants/models";
 import type { ChatCompletionRequest } from "../types/openai";
 import type { UpstreamChatRequest, UpstreamMessage } from "../types/upstream";
+import { hasTools } from "./tool-shim";
+
 
 export interface BuiltUpstreamRequest {
   endpoint: UpstreamEndpoint;
@@ -37,20 +39,40 @@ export function buildUpstreamRequest(
 
     if (msg.role === "assistant" && msg.tool_calls?.length) {
       const calls = msg.tool_calls
-        .map((tc) => `Called ${tc.function.name}(${tc.function.arguments})`)
-        .join("; ");
+        .map((tc) => `I called the "${tc.function.name}" tool with arguments ${tc.function.arguments}.`)
+        .join(" ");
       const flat = flattenContent(msg.content).trim();
       return { role, content: flat.length > 0 ? flat : calls };
     }
 
     if (msg.role === "tool") {
       const result = flattenContent(msg.content).trim();
-      return { role, content: `Tool result: ${result || "(no result returned)"}` };
+      return {
+        role,
+        content: `Here is the result of that tool call:\n${result || "(no result returned)"}\n\nUse this information to answer the user's original question in natural, conversational language. Do not just repeat the tool call or result verbatim.`,
+      };
     }
 
     const flat = flattenContent(msg.content);
     return { role, content: flat.length > 0 ? flat : (typeof msg.content === "string" ? msg.content : "") };
   });
+
+  // Tool prompting via injectToolPrompt() (chat.ts) only covers "should I
+  // call a tool," not "I already have a tool result, now answer." Models
+  // observed mimicking the injected "I called X tool with arguments Y"
+  // history line instead of synthesizing an answer — seen on both Claude
+  // and DeepSeek. This must fire whenever a tool result exists in history,
+  // REGARDLESS of whether `tools` is present on this request — compliant
+  // clients resend `tools` on every turn, so gating on its absence almost
+  // never actually fires in real traffic.
+  const hasToolResultInHistory = req.messages.some((m) => m.role === "tool");
+  if (hasToolResultInHistory) {
+    messages.push({
+      role: "system",
+      content:
+        "You already called a tool earlier in this conversation and received its result, shown above. Do not call the tool again and do not restate/summarize that you called it. Answer the user's original question now, directly, using that result.",
+    });
+  }  
 
   // OpenAI `metadata.save` extension → !noSave. Default: don't pollute the
   // caller's chatplayground history with API traffic (noSave=true).

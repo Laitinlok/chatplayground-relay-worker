@@ -84,10 +84,8 @@ chat.post("/v1/chat/completions", async (c) => {
     }
   }
 
-  // Prompt-injection tool-calling shim: chatplayground's upstream has no
-  // native tool support, so when the caller sends `tools`, rewrite the
-  // system prompt to ask for a structured JSON envelope instead, and parse
-  // that envelope back into OpenAI tool_calls on the way out.
+// Prompt-injection tool-calling shim: inject exactly one authoritative
+// tool prompt, then parse the model's reply back into OpenAI tool_calls.
   const toolsRequested = hasTools(body.tools);
   if (toolsRequested) {
     body.messages = injectToolPrompt(body.messages, body.tools!, body.tool_choice);

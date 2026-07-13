@@ -2,7 +2,7 @@ import type {
   ChatCompletionChunk,
   ChatCompletionChunkDelta,
 } from "../types/openai";
-import { tryParseRelayToolCall } from "./tool-shim";
+import { tryParseRelayToolCall, type ShimToolCall } from "./tool-shim";
 
 // chatplayground appends `CHAT_ID:<cuid>` at the very end of the stream as a
 // sentinel. CUID format: `c` + ≥20 chars of [a-z0-9]. We strip it before
@@ -149,6 +149,43 @@ export function streamUpstreamAsOpenAI(
     return encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`);
   }
 
+  /**
+   * Emits a proper OpenAI-compatible tool-call delta chunk. Clients like
+   * Agora watch for `delta.tool_calls[].function.{name,arguments}` and
+   * `finish_reason: "tool_calls"` — they do not parse arbitrary JSON sitting
+   * inside `delta.content`. Without this, a correctly-recognized
+   * `relay_tool_call` payload still fails to trigger tool execution
+   * downstream, even though the relay itself parsed it successfully.
+   */
+  function toolCallSse(toolCall: ShimToolCall): Uint8Array {
+    const chunk: ChatCompletionChunk = {
+      id: meta.id,
+      object: "chat.completion.chunk",
+      created: meta.created,
+      model: meta.model,
+      choices: [{
+        index: 0,
+        delta: {
+          tool_calls: [{
+            index: 0,
+            id: `call_${meta.id}`,
+            type: "function",
+            function: {
+                name: toolCall.function.name,
+              // OpenAI schema requires arguments as a JSON *string*, not a
+              // nested object — a common and separate failure point in
+              // relay/harness bridges.
+                arguments: toolCall.function.arguments,
+            },
+          }],
+        },
+        finish_reason: "tool_calls",
+      }],
+    };
+    return encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`);
+  }
+
+
   return new ReadableStream({
     async start(controller) {
       const reader = body.getReader();
@@ -173,9 +210,18 @@ export function streamUpstreamAsOpenAI(
         }
 
         pending += decoder.decode();
-        const { content, citations } = parseTrailers(pending);
+        const { content, citations, chatId } = parseTrailers(pending);
+        if (chatId) meta.onChatId?.(chatId);
+        const toolCall = tryParseRelayToolCall(content);
+         if (toolCall) {
+          controller.enqueue(toolCallSse(toolCall));
+          controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+          controller.close();
+        return;
+        }
+
         if (content) controller.enqueue(sse({ content }));
-        const sources = formatCitations(citations);
+          const sources = formatCitations(citations);
         if (sources) controller.enqueue(sse({ content: sources }));
 
         controller.enqueue(sse({}, "stop"));
