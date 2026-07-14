@@ -57,7 +57,7 @@ export function buildToolSystemPrompt(
       ? "You must not call any tool. Answer normally in plain text."
       : forcedName
         ? `You must call exactly one tool named "${forcedName}".`
-        : "If a tool is needed to answer, call exactly one tool. Otherwise answer normally in plain text.";
+        : "If a tool is needed to answer accurately or to complete a multi-step task, call it — do not answer from memory when a tool exists that would give a more current or verified result (e.g. translation, unit conversion via calculator, or live data). Multi-step tasks may require several tool calls across turns, one call per turn, in sequence.";
 
   const catalog = tools.map((t) => ({
     name: t.function.name,
@@ -76,7 +76,9 @@ export function buildToolSystemPrompt(
     `Relay-envelope example: ${TOOL_CALL_EXAMPLES[0]}`,
     `Native-dialect example (also acceptable): ${NATIVE_DIALECT_EXAMPLES[0]}`,
     "Call exactly one tool per turn — do not emit a second tool call or any further prose in the same reply",
-    "after the first one, even to explain what you're about to do next.",
+    "after the first one, even to explain what you're about to do next. It is expected and correct to make",
+    "additional tool calls on later turns if the task requires more than one step (e.g. look up a contact,",
+    "then create a calendar event; search for a file, then read it, then send its contents).",
     "If you are not calling a tool, respond with normal plain-text prose as usual.",
     policy,
     `Available tools: ${JSON.stringify(catalog)}`,

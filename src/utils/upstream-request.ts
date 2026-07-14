@@ -70,7 +70,7 @@ export function buildUpstreamRequest(
     messages.push({
       role: "system",
       content:
-        "You already called a tool earlier in this conversation and received its result, shown above. Do not call the tool again and do not restate/summarize that you called it. Answer the user's original question now, directly, using that result.",
+        "One or more tool results are already shown above in this conversation. Do not restate or summarize that you called a tool, and do not repeat an identical call with the same arguments you already have a result for. If the task is now fully complete, answer the user's original question directly using the result(s). If completing the task still requires another tool call — a different tool, different arguments, or the next step in a multi-step task — make that call now rather than stopping early or asking the user for permission to continue.",
     });
   }  
 
