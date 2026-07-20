@@ -15,12 +15,17 @@ export type OpenAIContentPart =
   | OpenAIContentPartText
   | OpenAIContentPartImage;
 
-export type OpenAIMessageContent = string | OpenAIContentPart[];
+export type OpenAIMessageContent = string | null | OpenAIContentPart[];
 
 export interface OpenAIMessage {
   role: "system" | "user" | "assistant" | "tool";
   content: OpenAIMessageContent;
   name?: string;
+  tool_calls?: Array<{
+    id: string;
+    type: "function";
+    function: { name: string; arguments: string };
+  }>;
 }
 
 export interface ChatCompletionRequest {
@@ -28,7 +33,9 @@ export interface ChatCompletionRequest {
   messages: OpenAIMessage[];
   stream?: boolean;
   // OpenAI extension fields we honor:
-  user?: string; // → chatplayground chatId (continue same chat)
+  user?: string; // -> chatplayground chatId (continue same chat)
+  tools?: import("../utils/tool-shim").OpenAITool[];
+  tool_choice?: import("../utils/tool-shim").ToolChoice;
   metadata?: { save?: boolean }; // → !noSave (default: noSave=true)
   // Fields accepted-and-ignored (no upstream equivalent):
   temperature?: number;
@@ -42,8 +49,8 @@ export interface ChatCompletionRequest {
 
 export interface ChatCompletionChoice {
   index: number;
-  message: { role: "assistant"; content: string };
-  finish_reason: "stop";
+  message: { role: "assistant"; content: string | null; tool_calls?: OpenAIMessage["tool_calls"] };
+  finish_reason: "stop" | "tool_calls";
 }
 
 export interface ChatCompletionUsage {
@@ -64,12 +71,18 @@ export interface ChatCompletionResponse {
 export interface ChatCompletionChunkDelta {
   role?: "assistant";
   content?: string;
+  tool_calls?: Array<{
+    index: number;
+    id: string;
+    type: "function";
+    function: { name: string; arguments: string };
+  }>;
 }
 
 export interface ChatCompletionChunkChoice {
   index: number;
   delta: ChatCompletionChunkDelta;
-  finish_reason: "stop" | null;
+  finish_reason: "stop" | "tool_calls" | null;
 }
 
 export interface ChatCompletionChunk {

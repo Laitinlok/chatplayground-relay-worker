@@ -121,6 +121,7 @@ chat.post("/v1/chat/completions", async (c) => {
           id,
           model: model.id,
           created,
+          tools: body.tools,
           onChatId,
         })
       : streamUpstreamAsOpenAI(upstream.body, {
@@ -145,7 +146,7 @@ chat.post("/v1/chat/completions", async (c) => {
     await saveCachedChatId(c.env, cacheKey, chatId);
   }
 
-  const toolCall = toolsRequested ? tryParseRelayToolCall(rawContent) : null;
+  const toolCall = toolsRequested ? tryParseRelayToolCall(rawContent, body.tools) : null;
 
   if (toolCall) {
     const toolResponse: ChatCompletionResponse = {

@@ -2,7 +2,7 @@ import type {
   ChatCompletionChunk,
   ChatCompletionChunkDelta,
 } from "../types/openai";
-import { tryParseRelayToolCall, type ShimToolCall } from "./tool-shim";
+import { tryParseRelayToolCall, type OpenAITool, type ShimToolCall } from "./tool-shim";
 
 // chatplayground appends `CHAT_ID:<cuid>` at the very end of the stream as a
 // sentinel. CUID format: `c` + ≥20 chars of [a-z0-9]. We strip it before
@@ -112,6 +112,7 @@ interface ChunkMeta {
   id: string;
   model: string;
   created: number;
+  tools?: OpenAITool[];
   onChatId?: (chatId: string) => void;
 }
 
@@ -212,7 +213,7 @@ export function streamUpstreamAsOpenAI(
         pending += decoder.decode();
         const { content, citations, chatId } = parseTrailers(pending);
         if (chatId) meta.onChatId?.(chatId);
-        const toolCall = tryParseRelayToolCall(content);
+        const toolCall = tryParseRelayToolCall(content, meta.tools);
          if (toolCall) {
           controller.enqueue(toolCallSse(toolCall));
           controller.enqueue(encoder.encode("data: [DONE]\n\n"));
@@ -250,6 +251,7 @@ interface ToolAwareChunkMeta {
   id: string;
   model: string;
   created: number;
+  tools?: OpenAITool[];
   onChatId?: (chatId: string) => void;
 }
 
@@ -296,7 +298,7 @@ export function streamUpstreamWithToolShim(
         const { content, chatId, citations } = parseTrailers(buf);
         if (chatId) meta.onChatId?.(chatId);
 
-        const toolCall = tryParseRelayToolCall(content);
+        const toolCall = tryParseRelayToolCall(content, meta.tools);
 
         if (toolCall) {
           controller.enqueue(

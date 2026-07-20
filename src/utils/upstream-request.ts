@@ -2,8 +2,6 @@ import type { UpstreamEndpoint } from "../constants/endpoints";
 import type { ModelEntry } from "../constants/models";
 import type { ChatCompletionRequest } from "../types/openai";
 import type { UpstreamChatRequest, UpstreamMessage } from "../types/upstream";
-import { hasTools } from "./tool-shim";
-
 
 export interface BuiltUpstreamRequest {
   endpoint: UpstreamEndpoint;
@@ -39,8 +37,8 @@ export function buildUpstreamRequest(
 
     if (msg.role === "assistant" && msg.tool_calls?.length) {
       const calls = msg.tool_calls
-        .map((tc) => `I called the "${tc.function.name}" tool with arguments ${tc.function.arguments}.`)
-        .join(" ");
+        .map((tc) => `TOOL_CALL: ${tc.function.name}\nARGUMENTS: ${tc.function.arguments}`)
+        .join("\n\n");
       const flat = flattenContent(msg.content).trim();
       return { role, content: flat.length > 0 ? flat : calls };
     }
@@ -49,7 +47,7 @@ export function buildUpstreamRequest(
       const result = flattenContent(msg.content).trim();
       return {
         role,
-        content: `Here is the result of that tool call:\n${result || "(no result returned)"}\n\nUse this information to answer the user's original question in natural, conversational language. Do not just repeat the tool call or result verbatim.`,
+        content: `[Tool Result]\n${result || "(no result returned)"}\n\nUse this information to answer the user's original question in natural, conversational language. Do not just repeat the tool call or result verbatim.`,
       };
     }
 
@@ -70,7 +68,7 @@ export function buildUpstreamRequest(
     messages.push({
       role: "system",
       content:
-        "One or more tool results are already shown above in this conversation. Do not restate or summarize that you called a tool, and do not repeat an identical call with the same arguments you already have a result for. If the task is now fully complete, answer the user's original question directly using the result(s). If completing the task still requires another tool call — a different tool, different arguments, or the next step in a multi-step task — make that call now rather than stopping early or asking the user for permission to continue.",
+        "Tool results are present above. Use them to answer the user's original question. Do not repeat a completed TOOL_CALL or its arguments. If another step is necessary, emit one new TOOL_CALL using the required JSON arguments; otherwise answer directly.",
     });
   }  
 

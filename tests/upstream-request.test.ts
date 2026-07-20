@@ -48,7 +48,29 @@ describe("buildUpstreamRequest — field mapping", () => {
     expect(body.botId).toBe("gpt-5.5");
   });
 
-  it("maps metadata.save → !noSave and user → chatId", () => {
+  it("serializes tool-call history using the injected text protocol", () => {
+    const { body } = buildUpstreamRequest(
+      {
+        model: "gpt-5.5",
+        messages: [
+          {
+            role: "assistant",
+            content: null,
+            tool_calls: [{
+              id: "call_1",
+              type: "function",
+              function: { name: "cron", arguments: '{"action":"add"}' },
+            }],
+          },
+          { role: "tool", content: "created" },
+        ],
+      },
+      AZURE_MODEL,
+    );
+    expect(body.messages[0]?.content).toBe('TOOL_CALL: cron\nARGUMENTS: {"action":"add"}');
+    expect(body.messages[1]?.content).toContain("[Tool Result]\ncreated");
+  });
+  it("maps metadata.save -> !noSave and user -> chatId", () => {
     const { body } = buildUpstreamRequest(
       {
         model: "gpt-5.5",
