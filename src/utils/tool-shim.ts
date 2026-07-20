@@ -103,6 +103,7 @@ export function injectToolPrompt(
 const INVOKE_BLOCK_RE = /<invoke\s+name="([^"]+)"\s*>([\s\S]*?)<\/invoke>/i;
 const PARAM_RE = /<parameter\s+name="([^"]+)"(?:\s+string="(true|false)")?\s*>([\s\S]*?)<\/parameter>/gi;
 const CLAUDE_TOOL_CALL_TAG_RE = /<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/i;
+const PROSE_TOOL_CALL_RE = /\bI\s+(?:called|call|am calling|will call)\s+the\s+"([^"]+)"\s+tool\s+with\s+arguments\s*/i;
 
 function coerceParamValue(raw: string, stringFlag: string | undefined): unknown {
   if (stringFlag === "true") return raw;
@@ -119,6 +120,7 @@ function parseInvokeDialect(text: string): { name: string; arguments: Record<str
   const match = INVOKE_BLOCK_RE.exec(text);
   if (!match) return null;
   const [, name, body] = match;
+  if (!name || name.trim() === "") return null;
   const args: Record<string, unknown> = {};
   let paramMatch: RegExpExecArray | null;
   PARAM_RE.lastIndex = 0;
@@ -135,19 +137,85 @@ function parseToolCallTagDialect(text: string): { name: string; arguments: Recor
   if (!match?.[1]) return null;
   try {
     const obj = JSON.parse(match[1]);
-    if (typeof obj?.name !== "string") return null;
+    if (typeof obj?.name !== "string" || obj.name.trim() === "") return null;
     return { name: obj.name, arguments: extractArguments(obj) };
   } catch {
     return null;
   }
 }
 
+/**
+ * OpenAI-compatible relays sometimes receive a model's natural-language
+ * narration of a tool call instead of the machine-readable call itself, e.g.
+ * `I called the "web_search" tool with arguments {...}.`. Treat that as a
+ * recoverable tool-call dialect so clients such as OpenClaw never see the
+ * malformed prose as assistant content.
+ */
+function parseProseToolCallDialect(text: string): { name: string; arguments: Record<string, unknown> } | null {
+  const match = PROSE_TOOL_CALL_RE.exec(text);
+  if (!match?.[1]) return null;
+
+  const jsonStart = text.indexOf("{", match.index + match[0].length);
+  const json = extractBalancedJson(text, jsonStart);
+  if (!json) return null;
+
+  const parsed = parseJsonObject(json) ?? parseLooseJsonObject(json);
+  if (!parsed) return null;
+
+  return { name: match[1], arguments: parsed };
+}
+
+function parseJsonObject(json: string): Record<string, unknown> | null {
+  try {
+    const value: unknown = JSON.parse(json);
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      return value as Record<string, unknown>;
+    }
+  } catch {
+    // fall through to caller fallback
+  }
+  return null;
+}
+
+/**
+ * Best-effort recovery for the common malformed search-query case where a
+ * quoted query is embedded without escaping its internal quotes:
+ * `{ "query": ""foo" "bar"", "count": 10 }`.
+ * This is intentionally narrow: it only repairs string values by escaping
+ * interior quotes between a property colon and the next comma/end brace.
+ */
+function parseLooseJsonObject(json: string): Record<string, unknown> | null {
+  const repaired = json.replace(
+    /(:\s*")([\s\S]*?)("\s*(?=,\s*"[A-Za-z0-9_$-]+"\s*:|\s*}))/g,
+    (_full: string, prefix: string, value: string, suffix: string) =>
+      prefix + value.replace(/(?<!\\)"/g, '\\"') + suffix,
+  );
+  return repaired === json ? null : parseJsonObject(repaired);
+}
 
 function extractArguments(obj: Record<string, unknown>): Record<string, unknown> {
   const nested = obj.arguments;
   if (nested && typeof nested === "object" && !Array.isArray(nested)) {
     return nested as Record<string, unknown>;
   }
+
+  // Some models (observed inconsistently across dialects) emit `arguments`
+  // as a JSON-encoded string rather than a nested object — e.g.
+  // "arguments":"{\"filepath\":\"foo.py\"}" instead of "arguments":{"filepath":"foo.py"}.
+  // Without this branch, the check above fails silently and the rest-spread
+  // below returns {} since name/arguments are typically the only two keys
+  // present — producing a "successful" tool call with no arguments at all.
+  if (typeof nested === "string") {
+    try {
+      const parsed: unknown = JSON.parse(nested);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return parsed as Record<string, unknown>;
+      }
+    } catch {
+      // fall through — not valid JSON, treat as no structured args
+    }
+  }
+
   const { name: _name, arguments: _arguments, ...rest } = obj;
   return rest;
 }
@@ -216,6 +284,14 @@ export function tryParseRelayToolCall(text: string): ShimToolCall | null {
       function: { name: tagged.name, arguments: JSON.stringify(tagged.arguments) },
     };
   }
+  const prose = parseProseToolCallDialect(trimmed);
+  if (prose) {
+    return {
+      id: `call_${crypto.randomUUID().replace(/-/g, "")}`,
+      type: "function",
+      function: { name: prose.name, arguments: JSON.stringify(prose.arguments) },
+    };
+  }
 
   const envelopeJson = findEnvelopeJson(trimmed) ?? (trimmed.startsWith("{") ? trimmed : null);
   if (!envelopeJson) return null;
@@ -229,7 +305,7 @@ export function tryParseRelayToolCall(text: string): ShimToolCall | null {
 
   const wrapper = parsed as Record<string, unknown>;
   const rawEnvelope = (wrapper?.[ENVELOPE_KEY] ?? wrapper) as Record<string, unknown> | undefined;
-  if (!rawEnvelope || typeof rawEnvelope.name !== "string") return null;
+  if (!rawEnvelope || typeof rawEnvelope.name !== "string" || rawEnvelope.name.trim() === "") return null;
   const args = extractArguments(rawEnvelope);
 
   return {
