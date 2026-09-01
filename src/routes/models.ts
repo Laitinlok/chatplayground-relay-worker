@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import type { Env, Variables } from "../types/env";
 import type { ModelList } from "../types/openai";
-import { getModels } from "../utils/model-discovery";
+import { getModels, isVisible } from "../utils/model-discovery";
 
 const models = new Hono<{ Bindings: Env; Variables: Variables }>();
 
@@ -10,22 +10,14 @@ models.get("/v1/models", async (c) => {
   const created = Math.floor(Date.now() / 1000);
   const list: ModelList = {
     object: "list",
-    data: registry.map((m) => ({
-      id: m.id,
-      object: "model",
-      created,
-      owned_by: m.provider,
-      ...(m.context_window !== undefined && {
-        context_window: m.context_window,
-      }),
-      ...(m.max_output_tokens !== undefined && {
-        max_output_tokens: m.max_output_tokens,
-      }),
-      ...(m.supports_tools !== undefined && {
-        supports_tools: m.supports_tools,
-      }),
-      ...(m.omniroute !== undefined && { omniroute: m.omniroute }),
-    })),
+    data: registry
+      .filter((m) => isVisible(m, c.env))
+      .map((m) => ({
+        id: m.id,
+        object: "model",
+        created,
+        owned_by: m.provider,
+      })),
   };
   return c.json(list);
 });

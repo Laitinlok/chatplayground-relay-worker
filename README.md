@@ -68,7 +68,7 @@ plaintext.)
 |---|---|
 | `POST /v1/chat/completions` | Stream + non-stream; multimodal (`image_url` content parts) |
 | `POST /v1/responses` | Responses API envelope; GPT-5.6-style input, streaming, and function-call items |
-| `GET /v1/models` | Dynamic discovery from chatplayground's `/api/models`, KV + memory cached |
+| `GET /v1/models` | Dynamic discovery from chatplayground's `/api/models`, KV + memory cached; `premiumOnly` models hidden unless `PREMIUM_MODELS="true"` |
 | `POST /v1/files` | Image upload proxy → returns a URL usable as `image_url.url` |
 
 | Not supported | Why |
@@ -324,6 +324,7 @@ Optional KV bindings:
 | Binding | Purpose |
 |---|---|
 | `MODEL_CACHE` | Cross-isolate model registry cache (1 h TTL) |
+| `CHAT_CACHE` | Optional upstream chat-session continuity cache (7 day TTL) |
 
 ## Caveats
 

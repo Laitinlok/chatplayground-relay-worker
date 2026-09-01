@@ -1,12 +1,9 @@
 import { toEndpoint } from "../constants/endpoints";
-import {
-  applyModelProfile,
-  SEED_MODELS,
-  type ModelEntry,
-} from "../constants/models";
+import type { ModelEntry } from "../constants/models";
 import { DISCOVERY_TIMEOUT } from "../constants/timeouts";
+import { OpenAIHTTPError } from "./errors";
 
-const CACHE_KEY = "models:v3"; // v3: switched to /api/models JSON; gained `endpoint`
+const CACHE_KEY = "models:v4"; // v4: entries gained `premiumOnly`
 const KV_TTL_S = 60 * 60; // 1 hour
 const MEM_TTL_MS = 5 * 60 * 1000; // 5 min in-isolate cache
 
@@ -27,15 +24,15 @@ export async function getModels(env: DiscoveryEnv): Promise<ModelEntry[]> {
   if (env.MODEL_CACHE) {
     const cached = await env.MODEL_CACHE.get<ModelEntry[]>(CACHE_KEY, "json");
     if (cached && cached.length > 0) {
-      const profiled = cached.map(applyModelProfile);
-      memCache = { at: Date.now(), data: profiled };
-      return profiled;
+      memCache = { at: Date.now(), data: cached };
+      return cached;
     }
   }
 
   try {
     const fresh = await discover(env.UPSTREAM_CHAT_URL);
-    if (fresh.length === 0) throw new Error("no chat models in /api/models feed");
+    if (fresh.length === 0)
+      throw new Error("no chat models in /api/models feed");
     if (env.MODEL_CACHE) {
       await env.MODEL_CACHE.put(CACHE_KEY, JSON.stringify(fresh), {
         expirationTtl: KV_TTL_S,
@@ -44,8 +41,16 @@ export async function getModels(env: DiscoveryEnv): Promise<ModelEntry[]> {
     memCache = { at: Date.now(), data: fresh };
     return fresh;
   } catch (err) {
-    console.error("Model discovery failed; using SEED fallback.", err);
-    return SEED_MODELS;
+    // No fallback list on purpose. Serving a stale hardcoded registry turned
+    // "discovery is down" into a 404 model_not_found, which tells callers the
+    // model doesn't exist when it does. 503 is the honest, retryable answer.
+    console.error("Model discovery failed.", err);
+    throw new OpenAIHTTPError(
+      503,
+      "Model registry unavailable: could not reach the upstream /api/models feed.",
+      "upstream_error",
+      "model_discovery_failed",
+    );
   }
 }
 
@@ -56,9 +61,19 @@ interface ApiModel {
   provider: string;
   group: string;
   endpoint: string;
+  // Optional on purpose: if upstream ever drops the field we still want
+  // discovery to succeed rather than fail the whole request.
+  premiumOnly?: boolean;
 }
 
 async function discover(chatUrl: string): Promise<ModelEntry[]> {
+  // Fetched WITHOUT the Clerk id on purpose. /api/models is a public static
+  // catalogue: the response is byte-identical with and without an
+  // X-Clerk-User-Id header, so sending one buys nothing. Upstream personalises
+  // nothing here — it ships the raw flags (premiumOnly, lifetimeOnly, tier,
+  // creditWeight) and lets its own frontend do the filtering, which is why
+  // this relay has to filter too.
+  //
   // /api/chat/azure → /api/models (sibling under /api/)
   const url = new URL("../models", chatUrl);
   const res = await fetch(url, {
@@ -81,14 +96,23 @@ async function discover(chatUrl: string): Promise<ModelEntry[]> {
     const upstreamModel = e.modelName.includes("/")
       ? e.modelName
       : `${provider}/${e.modelName}`;
-    out.push(applyModelProfile({
+    out.push({
       id: e.botId,
       modelName: e.modelName,
       upstreamModel,
       upstreamBotId: e.botId,
       provider,
       endpoint: toEndpoint(e.endpoint),
-    }));
+      premiumOnly: e.premiumOnly === true,
+    });
+  }
+  // The /v1/models filter is the only consumer of premiumOnly. If upstream
+  // renames or drops the field, every model silently becomes non-premium and
+  // that wrong registry sits in KV for an hour. Loud beats silently wrong.
+  if (out.length > 0 && !out.some((e) => e.premiumOnly)) {
+    console.error(
+      "No premiumOnly:true entries in /api/models — field may have changed shape.",
+    );
   }
   return out;
 }
@@ -105,4 +129,33 @@ function isApiModel(v: unknown): v is ApiModel {
     typeof o.group === "string" &&
     typeof o.endpoint === "string"
   );
+}
+
+// Which models `/v1/models` advertises: everything the feed does not mark
+// `premiumOnly`, which is the set a paid account was measured to be able to
+// call.
+//
+// Upstream gates on `premiumOnly`, NOT on `tier`. Verified against all three
+// models where the two fields disagree (tier=basic + premiumOnly=true):
+// gemini-3.7-flash, gemini-3.6-flash and grok-4.6 all 403. No model is
+// tier=advanced without also being premiumOnly, so tier is never the gate.
+//
+// Manual flag, not auto-detected, because upstream exposes no entitlement to
+// detect from: the catalogue is impersonal (see discover()), and every /api/*
+// route answers 401 to an unauthenticated caller whether or not it exists, so
+// probing for an account endpoint proves nothing. Access only becomes
+// observable by making a chat call and reading the 403 — which is a
+// credit-spending side effect no /v1/models request should have.
+//
+// `lifetimeOnly` is not read, and that is not a claim about what it means.
+// Only one such model was ever tested and it succeeded, which cannot tell a
+// real gate apart from a UI badge — compare `active`, which the feed sets and
+// upstream ignores. Since all three lifetimeOnly models are premiumOnly:false
+// they are listed either way, so the filter never has to resolve it.
+// Chat requests are never filtered — upstream is the one enforcing access.
+export function isVisible(
+  m: ModelEntry,
+  env: { PREMIUM_MODELS?: string },
+): boolean {
+  return env.PREMIUM_MODELS === "true" || !m.premiumOnly;
 }

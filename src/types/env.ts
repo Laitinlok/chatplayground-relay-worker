@@ -4,6 +4,8 @@ export interface Env {
   UPSTREAM_ORIGIN: string;
   UPSTREAM_REFERER: string;
   UPSTREAM_UPLOAD_URL: string;
+  // "true" exposes premium models in /v1/models. Unset → non-premium list.
+  PREMIUM_MODELS?: string;
 
   // Gateway auth (optional — set via `wrangler secret put`). When RELAY_API_KEY
   // is set, callers present it instead of a Clerk ID and the worker uses its own
@@ -12,11 +14,10 @@ export interface Env {
   RELAY_API_KEY?: string;
   CLERK_USER_ID?: string;
 
-  // KV bindings (optional — discovery falls back to SEED_MODELS without them)
+  // KV binding (optional — without it every cold isolate refetches the model
+  // feed, and a discovery failure surfaces as a 503)
   MODEL_CACHE?: KVNamespace;
-  RATE_LIMIT?: KVNamespace;
-  // Chat-session cache (optional — enables upstream chat continuity so the
-  // relay doesn't spend a fresh chatplayground chat quota on every request).
+  // Chat-session cache (optional — enables upstream chat continuity).
   CHAT_CACHE?: KVNamespace;
 }
 

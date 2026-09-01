@@ -38,7 +38,11 @@ const chat = new Hono<{ Bindings: Env; Variables: Variables }>();
 
 const CHAT_CACHE_TTL_SECONDS = 60 * 60 * 24 * 7; // 7 days
 
-function chatCacheKey(clerkUserId: string, modelId: string, conversationId?: string): string {
+function chatCacheKey(
+  clerkUserId: string,
+  modelId: string,
+  conversationId?: string,
+): string {
   return `chat:${conversationId ?? `${clerkUserId}:${modelId}`}`;
 }
 
@@ -114,11 +118,12 @@ chat.post("/v1/chat/completions", async (c) => {
   });
 
   if (!upstream.ok || !upstream.body) {
-    const upstreamDetail = await upstream.text().catch(() => "");
-    const detail = upstreamDetail.trim().slice(0, 500);
+    const detail = (await upstream.text().catch(() => "")).trim();
     throw upstreamError(
       upstream.status,
-      `Upstream returned ${upstream.status}${detail ? `: ${detail}` : ". Most likely cause: invalid X-Clerk-User-Id, unsupported model, or upstream outage."}`,
+      detail
+        ? `Upstream returned ${upstream.status}: ${detail.slice(0, 300)}`
+        : `Upstream returned ${upstream.status} with no message.`,
     );
   }
 
@@ -154,13 +159,17 @@ chat.post("/v1/chat/completions", async (c) => {
     });
   }
 
-  const { content: rawContent, citations, chatId } = await collectUpstream(upstream.body);
+  const { content: rawContent, citations, chatId } = await collectUpstream(
+    upstream.body,
+  );
 
   if (chatId) {
     await saveCachedChatId(c.env, cacheKey, chatId);
   }
 
-  const toolCall = toolsRequested ? tryParseRelayToolCall(rawContent, body.tools) : null;
+  const toolCall = toolsRequested
+    ? tryParseRelayToolCall(rawContent, body.tools)
+    : null;
 
   if (toolCall) {
     const toolResponse: ChatCompletionResponse = {

@@ -31,7 +31,7 @@ interface UpstreamBodyBase {
   isRegenerate: boolean;
   promptTemplate: null;
   fileUrl: null;
-  botId: string; // short id, e.g. "gemini-3-flash"
+  botId: string; // short id, e.g. "perplexity-sonar"
   noSave: boolean;
   reasoning_effort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
   verbosity?: "low" | "medium" | "high";
@@ -39,7 +39,7 @@ interface UpstreamBodyBase {
 
 // /api/chat/azure — model is the full slug; no apiKey field.
 export interface UpstreamAzureBody extends UpstreamBodyBase {
-  model: string; // full slug, e.g. "google/gemini-3-flash-preview"
+  model: string; // full slug, e.g. "openai/gpt-5.6-luna"
 }
 
 // /api/chat/perplexity — bare modelName + apiKey (null = use upstream's key).
