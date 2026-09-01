@@ -8,15 +8,15 @@ import { tryParseRelayToolCall, type OpenAITool, type ShimToolCall } from "./too
 // sentinel. CUID format: `c` + ≥20 chars of [a-z0-9]. We strip it before
 // emitting content.
 const SENTINEL_RE = /CHAT_ID:(c[a-z0-9]{20,})$/;
-const HOLDBACK_CHARS = 100;
 
 // perplexity emits its citation list as a trailing chunk of the form
 // `CITATIONS:["url1","url2",...]`. The web client parses it as structured
 // citations; we strip it from the prose and re-format as Markdown so
 // OpenAI-compatible clients render proper links.
 const CITATIONS_RE = /CITATIONS:(\[[\s\S]*?\])/;
-const CITATIONS_MARKER = "CITATIONS:[";
-const CHAT_ID_MARKER_RE = /CHAT_ID:c[a-z0-9]{20,}/;
+const REASONING_TAG_PATTERN = "<(\\/?)\\s*(think|thinking|reasoning|analysis|thought)\\s*>";
+const ESCAPED_REASONING_TAG_PATTERN =
+  "&lt;(\\/?)\\s*(think|thinking|reasoning|analysis|thought)\\s*&gt;";
 
 export interface ParsedUpstream {
   content: string;
@@ -106,6 +106,69 @@ export function inlineCitationLinks(
     if (!url) return match; // unknown index — leave the literal marker
     return `[\\[${idx}\\]](${url})`;
   });
+}
+
+export interface SplitReasoningContent {
+  content: string;
+  reasoningContent: string;
+}
+
+/**
+ * Convert model-emitted reasoning tags into the OpenAI-compatible
+ * `reasoning_content` channel consumed by Agora and similar clients.
+ */
+export function splitReasoningContent(text: string): SplitReasoningContent {
+  const escapedTagRegex = new RegExp(ESCAPED_REASONING_TAG_PATTERN, "gi");
+  const reasoningTagRegex = new RegExp(REASONING_TAG_PATTERN, "gi");
+  const normalized = text.replace(
+    escapedTagRegex,
+    (_match, closing: string, name: string) => `<${closing}${name.toLowerCase()}>`,
+  );
+  let content = "";
+  let reasoningContent = "";
+  let depth = 0;
+  let cursor = 0;
+  let sawOpeningTag = false;
+
+  let match = reasoningTagRegex.exec(normalized);
+  while (match !== null) {
+    const preceding = normalized.slice(cursor, match.index);
+    if (depth > 0) reasoningContent += preceding;
+    else content += preceding;
+
+    const closing = match[1] === "/";
+    if (closing) {
+      if (depth > 0) {
+        depth--;
+      } else if (!sawOpeningTag && reasoningContent.length === 0) {
+        // DeepSeek-compatible endpoints sometimes omit the opening <think>
+        // marker but still send </think>. In that dialect, everything before
+        // the first closing marker is reasoning rather than answer content.
+        reasoningContent = content;
+        content = "";
+      } else {
+        content += match[0];
+      }
+    } else {
+      sawOpeningTag = true;
+      depth++;
+    }
+    cursor = match.index + match[0].length;
+    match = reasoningTagRegex.exec(normalized);
+  }
+
+  const remainder = normalized.slice(cursor);
+  if (depth > 0) reasoningContent += remainder;
+  else content += remainder;
+  return { content, reasoningContent };
+}
+
+/** Retained for callers that explicitly need inline-tag output. */
+export function formatThinkTags(text: string): string {
+  const split = splitReasoningContent(text);
+  return split.reasoningContent
+    ? `\n<think>\n${split.reasoningContent}\n</think>\n${split.content}`
+    : split.content;
 }
 
 interface ChunkMeta {
@@ -202,12 +265,8 @@ export function streamUpstreamAsOpenAI(
 
           pending += decoder.decode(value, { stream: true });
 
-          const boundary = flushBoundary(pending);
-          if (boundary > 0) {
-            const out = pending.slice(0, boundary);
-            pending = pending.slice(boundary);
-            controller.enqueue(sse({ content: out }));
-          }
+          // Reasoning tags can span arbitrary upstream chunks. Keep the
+          // response buffered so tags never leak into ordinary content.
         }
 
         pending += decoder.decode();
@@ -221,9 +280,13 @@ export function streamUpstreamAsOpenAI(
         return;
         }
 
-        if (content) controller.enqueue(sse({ content }));
-          const sources = formatCitations(citations);
-        if (sources) controller.enqueue(sse({ content: sources }));
+        const split = splitReasoningContent(content);
+        if (split.reasoningContent) {
+          controller.enqueue(sse({ reasoning_content: split.reasoningContent }));
+        }
+        const sources = formatCitations(citations);
+        const answer = split.content + sources;
+        if (answer) controller.enqueue(sse({ content: answer }));
 
         controller.enqueue(sse({}, "stop"));
         controller.enqueue(encoder.encode("data: [DONE]\n\n"));
@@ -234,18 +297,6 @@ export function streamUpstreamAsOpenAI(
     },
   });
 }
-
-function flushBoundary(pending: string): number {
-  const citIdx = pending.indexOf(CITATIONS_MARKER);
-  const cidMatch = CHAT_ID_MARKER_RE.exec(pending);
-  const cidIdx = cidMatch ? cidMatch.index : -1;
-
-  if (citIdx >= 0 && cidIdx >= 0) return Math.min(citIdx, cidIdx);
-  if (citIdx >= 0) return citIdx;
-  if (cidIdx >= 0) return cidIdx;
-  return Math.max(0, pending.length - HOLDBACK_CHARS);
-}
-
 
 interface ToolAwareChunkMeta {
   id: string;
@@ -317,8 +368,12 @@ export function streamUpstreamWithToolShim(
           controller.enqueue(sse({}, "tool_calls"));
         } else {
           controller.enqueue(sse({ role: "assistant" }));
-          const sources = formatCitations(citations);
-          controller.enqueue(sse({ content: content + sources }));
+          const split = splitReasoningContent(content);
+          if (split.reasoningContent) {
+            controller.enqueue(sse({ reasoning_content: split.reasoningContent }));
+          }
+          const answer = split.content + formatCitations(citations);
+          if (answer) controller.enqueue(sse({ content: answer }));
           controller.enqueue(sse({}, "stop"));
         }
 

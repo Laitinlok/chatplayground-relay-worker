@@ -5,9 +5,9 @@
 
 ## What it does
 
-Wraps chatplayground.ai's internal chat endpoint as a standard OpenAI
-`/v1/chat/completions` API, so any OpenAI-compatible client can use
-chatplayground's chat models with your existing chatplayground account.
+Wraps chatplayground.ai's internal chat endpoint as standard OpenAI
+`/v1/chat/completions` and `/v1/responses` APIs, so OpenAI-compatible clients
+can use chatplayground's chat models with your existing chatplayground account.
 
 ```
 OpenAI SDK ──► Cloudflare Worker ──► chatplayground.ai
@@ -67,12 +67,13 @@ plaintext.)
 | Endpoint | Notes |
 |---|---|
 | `POST /v1/chat/completions` | Stream + non-stream; multimodal (`image_url` content parts) |
+| `POST /v1/responses` | Responses API envelope; GPT-5.6-style input, streaming, and function-call items |
 | `GET /v1/models` | Dynamic discovery from chatplayground's `/api/models`, KV + memory cached |
 | `POST /v1/files` | Image upload proxy → returns a URL usable as `image_url.url` |
 
 | Not supported | Why |
 |---|---|
-| Tool / function calling | No upstream chat endpoint exposes tool use |
+| Tool / function calling | Supported through the relay's structured prompt shim; native upstream tool execution is not available |
 | `/v1/images/generations` | Upstream image-gen models live on a different endpoint |
 | `/v1/embeddings` | Upstream doesn't expose embeddings |
 | `/v1/audio/*` | Upstream doesn't expose audio |
@@ -184,6 +185,21 @@ for chunk in client.chat.completions.create(
 ):
     print(chunk.choices[0].delta.content or "", end="", flush=True)
 
+# Responses API, including function tools
+resp = client.responses.create(
+    model="gpt-5.6",
+    input="Find the latest status",
+    tools=[{
+        "type": "function",
+        "name": "web_search",
+        "description": "Search the web",
+        "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
+    }],
+)
+print(resp.output_text)
+# When the model requests a tool, inspect resp.output for type="function_call",
+# execute it in your application, then send function_call_output in the next input.
+
 # Vision — upload via /v1/files, then reference
 file = client.files.create(file=open("photo.jpg", "rb"), purpose="vision")
 resp = client.chat.completions.create(
@@ -233,7 +249,8 @@ caller (OpenAI SDK)
 Cloudflare Worker (Hono)
   ├── middleware/auth          → extract Clerk user_id from Bearer / X-Clerk-User-Id
   ├── middleware/error-handler → wrap thrown errors in OpenAI envelope
-  ├── routes/chat              → translate body, fetch upstream, stream back
+  ├── routes/chat              → translate chat completions, stream back
+  ├── routes/responses         → translate Responses input/output and tool items
   ├── routes/models            → live discovery + 3-layer cache
   └── routes/files             → forward multipart to temp-file-host
                 │
@@ -275,6 +292,7 @@ src/
 │   └── error-handler.ts      → OpenAI error envelope
 ├── routes/
 │   ├── chat.ts               POST /v1/chat/completions
+│   ├── responses.ts          POST /v1/responses
 │   ├── models.ts             GET  /v1/models
 │   └── files.ts              POST /v1/files
 ├── types/
@@ -309,11 +327,11 @@ Optional KV bindings:
 
 ## Caveats
 
-1. **No tool / function calling.** None of the upstream chat endpoints
-   (`azure` / `perplexity` / `lmsys`) support it — live-tested: injected
-   OpenAI `tools` are ignored and answered as prose, and a forced
-   `tool_choice` returns a plain-text error, never a structured `tool_calls`
-   reply. The relay also never forwards `tools` / `tool_choice` upstream.
+1. **Tool calling uses a compatibility shim.** chatplayground's upstream chat
+   endpoints do not expose native tool execution. The relay injects tool
+   instructions, parses the model's structured call, and returns a standard
+   `tool_calls` or Responses `function_call` item. Your application executes
+   the tool and sends its result in the next request.
 2. **No real usage counts.** chatplayground doesn't return token usage, so
    the `usage` field is estimated (chars ÷ 4). Don't bill on it.
 3. **Brittle to upstream changes.** Any change to `/api/models` shape, endpoint

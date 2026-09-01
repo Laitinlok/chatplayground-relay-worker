@@ -9,9 +9,56 @@ export interface OpenAITool {
   };
 }
 
+interface FlatFunctionTool {
+  type: "function";
+  name: string;
+  description?: string;
+  parameters?: unknown;
+}
+
+/** Normalize Chat Completions and Responses-style function tool definitions. */
+export function normalizeOpenAITools(tools: unknown): OpenAITool[] {
+  if (!Array.isArray(tools)) return [];
+  return tools.flatMap((tool): OpenAITool[] => {
+    if (!tool || typeof tool !== "object") return [];
+    const candidate = tool as Record<string, unknown>;
+    if (candidate.type !== "function") return [];
+
+    const nested = candidate.function;
+    if (nested && typeof nested === "object") {
+      const fn = nested as Record<string, unknown>;
+      if (typeof fn.name !== "string" || !fn.name.trim()) return [];
+      return [{
+        type: "function",
+        function: {
+          name: fn.name,
+          ...(typeof fn.description === "string" ? { description: fn.description } : {}),
+          ...(fn.parameters !== undefined ? { parameters: fn.parameters } : {}),
+        },
+      }];
+    }
+
+    const flat = candidate as Partial<FlatFunctionTool>;
+    if (typeof flat.name !== "string" || !flat.name.trim()) return [];
+    return [{
+      type: "function",
+      function: {
+        name: flat.name,
+        ...(typeof flat.description === "string" ? { description: flat.description } : {}),
+        ...(flat.parameters !== undefined ? { parameters: flat.parameters } : {}),
+      },
+    }];
+  });
+}
+
+export function hasTools(tools: unknown): tools is OpenAITool[] {
+  return normalizeOpenAITools(tools).length > 0;
+}
+
 export type ToolChoice =
   | "none"
   | "auto"
+  | "required"
   | { type: "function"; function: { name: string } };
 
 export interface ShimToolCall {
@@ -23,25 +70,14 @@ export interface ShimToolCall {
   };
 }
 
-export function hasTools(tools: unknown): tools is OpenAITool[] {
-  return Array.isArray(tools) && tools.length > 0 && tools.every((tool) => {
-    if (!tool || typeof tool !== "object") return false;
-    const candidate = tool as Record<string, unknown>;
-    const fn = candidate.function;
-    return candidate.type === "function"
-      && !!fn
-      && typeof fn === "object"
-      && typeof (fn as Record<string, unknown>).name === "string"
-      && ((fn as Record<string, unknown>).name as string).trim().length > 0;
-  });
-}
-
 interface ParsedToolIntent {
   name: string;
   arguments: Record<string, unknown>;
 }
 
 const ENVELOPE_KEY = "relay_tool_call";
+const TOOL_PROMPT_SENTINEL = "[relay-tool-prompt-v1]";
+const REASONING_PROMPT_SENTINEL = "[relay-reasoning-prompt-v1]";
 const ENVELOPE_KEY_ALIASES = [
   "relay_tool_call",
   "tool_call",
@@ -184,7 +220,9 @@ export function buildToolSystemPrompt(
   const policy =
     toolChoice === "none"
       ? "You must not call any tool. Answer normally in plain text."
-      : forcedName
+      : toolChoice === "required"
+        ? "You must call exactly one tool from the available list."
+        : forcedName
         ? `You must call exactly one tool named "${forcedName}".`
         : "If a tool is needed to answer accurately or to complete a multi-step task, call it — do not answer from memory when a tool exists that would give a more current or verified result (e.g. translation, unit conversion via calculator, or live data). Multi-step tasks may require several tool calls across turns, one call per turn, in sequence.";
 
@@ -196,6 +234,7 @@ export function buildToolSystemPrompt(
 
   return [
     "You are running behind an OpenAI-compatible relay that has no native tool-calling support.",
+    TOOL_PROMPT_SENTINEL,
     "Available tools:",
     formatToolCatalog(tools),
     "Only use tools from this list; never invent a tool name.",
@@ -204,6 +243,8 @@ export function buildToolSystemPrompt(
     `Example:\n${TOOL_CALL_EXAMPLES[0]}`,
     "Include every required parameter. Make one call at a time and wait for the tool result.",
     "After a tool result is provided, either answer the user directly or make the next necessary call.",
+    "If no further tool is needed, give a complete, self-contained final answer to the user's original request in this turn. Do not stop after a plan, acknowledgement, preamble, or a single incomplete sentence.",
+    "When a tool is needed, emit the call immediately; do not preface it with statements such as 'I will search'.",
     "Do not wrap a tool call in markdown fences and do not add prose after its arguments.",
     `JSON envelope fallback (also accepted): ${TOOL_CALL_EXAMPLES[1]}`,
     "Call exactly one tool per turn — do not emit a second tool call or any further prose in the same reply",
@@ -216,6 +257,29 @@ export function buildToolSystemPrompt(
   ].join("\n");
 }
 
+export function injectReasoningPrompt(
+  messages: OpenAIMessage[],
+  effort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh",
+): OpenAIMessage[] {
+  if (!effort || effort === "none") return messages;
+
+  const prompt = [
+    REASONING_PROMPT_SENTINEL,
+    `Reasoning mode is enabled with strength "${effort}".`,
+    "Reason carefully before giving the final answer.",
+    "Put the reasoning portion inside exactly one <think>...</think> block, followed by the final answer outside that block.",
+    "Do not print an unmatched closing </think> tag. Keep the reasoning proportional to the requested strength.",
+  ].join("\n");
+  const [first, ...rest] = messages;
+
+  if (first?.role === "system" && typeof first.content === "string") {
+    if (first.content.includes(REASONING_PROMPT_SENTINEL)) return messages;
+    return [{ ...first, content: `${first.content}\n\n${prompt}` }, ...rest];
+  }
+
+  return [{ role: "system", content: prompt }, ...messages];
+}
+
 export function injectToolPrompt(
   messages: OpenAIMessage[],
   tools: OpenAITool[],
@@ -225,6 +289,7 @@ export function injectToolPrompt(
   const [first, ...rest] = messages;
 
   if (first?.role === "system" && typeof first.content === "string") {
+    if (first.content.includes(TOOL_PROMPT_SENTINEL)) return messages;
     return [{ ...first, content: `${first.content}\n\n${toolPrompt}` }, ...rest];
   }
 
@@ -234,7 +299,7 @@ export function injectToolPrompt(
 const INVOKE_BLOCK_RE = /<invoke\s+name="([^"]+)"\s*>([\s\S]*?)<\/invoke>/i;
 const PARAM_RE = /<parameter\s+name="([^"]+)"(?:\s+string="(true|false)")?\s*>([\s\S]*?)<\/parameter>/gi;
 const CLAUDE_TOOL_CALL_TAG_RE = /<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/i;
-const TEXT_TOOL_CALL_RE = /(?:^|\n)\s*TOOL_CALL\s*:\s*([^\n]+)\s*\n\s*ARGUMENTS\s*:\s*/i;
+const TEXT_TOOL_CALL_RE = /\bTOOL_CALL\s*:\s*([^\r\n]+?)\s+(?:\r?\n\s*)?ARGUMENTS\s*:\s*/i;
 const NATIVE_JSON_TOOL_CALL_RE = /"tool_calls"\s*:\s*\[/i;
 const PROSE_TOOL_CALL_RE = /\bI\s+(?:called|call|am calling|will call)\s+the\s+"([^"]+)"\s+tool\s+with\s+arguments\s*/i;
 

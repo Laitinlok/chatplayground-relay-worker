@@ -3,6 +3,8 @@ import type { ModelEntry } from "../constants/models";
 import type { ChatCompletionRequest } from "../types/openai";
 import type { UpstreamChatRequest, UpstreamMessage } from "../types/upstream";
 
+const MAX_UPSTREAM_MESSAGE_CHARS = 15_000;
+
 export interface BuiltUpstreamRequest {
   endpoint: UpstreamEndpoint;
   body: UpstreamChatRequest;
@@ -21,7 +23,7 @@ export function buildUpstreamRequest(
   // upstream Azure/perplexity/lmsys endpoints reject outright ("400 Invalid
   // value for 'content': expected a string, got null"). Fold tool_calls and
   // tool-role results into plain text instead of dropping/nulling them.
-  const messages: UpstreamMessage[] = req.messages.map((msg) => {
+  const messages: UpstreamMessage[] = req.messages.flatMap((msg) => {
     const role = msg.role === "tool" ? "user" : msg.role;
 
     function flattenContent(content: unknown): string {
@@ -35,24 +37,22 @@ export function buildUpstreamRequest(
       return "";
     }
 
+    let content: string;
     if (msg.role === "assistant" && msg.tool_calls?.length) {
       const calls = msg.tool_calls
         .map((tc) => `TOOL_CALL: ${tc.function.name}\nARGUMENTS: ${tc.function.arguments}`)
         .join("\n\n");
       const flat = flattenContent(msg.content).trim();
-      return { role, content: flat.length > 0 ? flat : calls };
-    }
-
-    if (msg.role === "tool") {
+      content = flat.length > 0 ? flat : calls;
+    } else if (msg.role === "tool") {
       const result = flattenContent(msg.content).trim();
-      return {
-        role,
-        content: `[Tool Result]\n${result || "(no result returned)"}\n\nUse this information to answer the user's original question in natural, conversational language. Do not just repeat the tool call or result verbatim.`,
-      };
+      content = `[Tool Result]\n${result || "(no result returned)"}\n\nUse this information to answer the user's original question in natural, conversational language. Do not just repeat the tool call or result verbatim.`;
+    } else {
+      const flat = flattenContent(msg.content);
+      content = flat.length > 0 ? flat : (typeof msg.content === "string" ? msg.content : "");
     }
 
-    const flat = flattenContent(msg.content);
-    return { role, content: flat.length > 0 ? flat : (typeof msg.content === "string" ? msg.content : "") };
+    return splitUpstreamMessage(role, content);
   });
 
   // Tool prompting via injectToolPrompt() (chat.ts) only covers "should I
@@ -85,6 +85,8 @@ export function buildUpstreamRequest(
     fileUrl: null,
     botId: model.upstreamBotId,
     noSave: !save,
+    ...(req.reasoning_effort ? { reasoning_effort: req.reasoning_effort } : {}),
+    ...(req.verbosity ? { verbosity: req.verbosity } : {}),
   };
 
   // The model identifier field differs per endpoint (see types/upstream.ts):
@@ -107,6 +109,24 @@ export function buildUpstreamRequest(
         body: { ...base, model: model.modelName, apiKey: null },
       };
   }
+}
+
+function splitUpstreamMessage(
+  role: UpstreamMessage["role"],
+  content: string,
+): UpstreamMessage[] {
+  if (content.length <= MAX_UPSTREAM_MESSAGE_CHARS) {
+    return [{ role, content }];
+  }
+
+  const chunks: UpstreamMessage[] = [];
+  for (let offset = 0; offset < content.length; offset += MAX_UPSTREAM_MESSAGE_CHARS) {
+    chunks.push({
+      role,
+      content: content.slice(offset, offset + MAX_UPSTREAM_MESSAGE_CHARS),
+    });
+  }
+  return chunks;
 }
 
 export function endpointUrl(

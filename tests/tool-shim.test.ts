@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   buildToolSystemPrompt,
+  injectReasoningPrompt,
+  normalizeOpenAITools,
   tryParseRelayToolCall,
   type OpenAITool,
 } from "../src/utils/tool-shim";
@@ -48,6 +50,60 @@ describe("tryParseRelayToolCall", () => {
     expect(call?.function.arguments).toBe('{"action":"add","amount":6600}');
   });
 
+  it("accepts inline TOOL_CALL labels", () => {
+    const call = tryParseRelayToolCall(
+      "I will search. TOOL_CALL: web_search ARGUMENTS: {\"query\":\"food hacks\"}",
+      tools,
+    );
+    expect(call?.function.name).toBe("web_search");
+    expect(call?.function.arguments).toBe('{"query":"food hacks"}');
+  });
+
+  it("parses the exact relay text emitted by non-5.x model families", () => {
+    const call = tryParseRelayToolCall(
+      "I'll search the web to find the latest TikTok food hacks for you.\r\nTOOL_CALL: ddg_search_search\r\nARGUMENTS: {\"query\":\"latest TikTok food hacks 2025\",\"max_results\":10}",
+      normalizeOpenAITools([
+        {
+          type: "function",
+          name: "ddg_search_search",
+          description: "Search the web",
+          parameters: { type: "object" },
+        },
+      ]),
+    );
+    expect(call?.function.name).toBe("ddg_search_search");
+    expect(call?.function.arguments).toBe(
+      '{"query":"latest TikTok food hacks 2025","max_results":10}',
+    );
+  });
+
+  it("normalizes flat Responses-style tools for chat requests", () => {
+    expect(normalizeOpenAITools([
+      { type: "function", name: "ddg_search_search", parameters: {} },
+    ])).toEqual([
+      { type: "function", function: { name: "ddg_search_search", parameters: {} } },
+    ]);
+  });
+
+  it("injects reasoning instructions with the requested strength", () => {
+    const messages = injectReasoningPrompt(
+      [{ role: "user", content: "solve this" }],
+      "high",
+    );
+    expect(messages[0]).toMatchObject({ role: "system" });
+    expect(messages[0]?.content).toContain("[relay-reasoning-prompt-v1]");
+    expect(messages[0]?.content).toContain('strength "high"');
+    expect(messages[0]?.content).toContain("<think>...</think>");
+  });
+
+  it("does not duplicate reasoning instructions", () => {
+    const first = injectReasoningPrompt(
+      [{ role: "user", content: "solve this" }],
+      "medium",
+    );
+    expect(injectReasoningPrompt(first, "high")).toEqual(first);
+  });
+
   it("injects a compact catalog with required parameter guidance", () => {
     const prompt = buildToolSystemPrompt([
       {
@@ -66,6 +122,8 @@ describe("tryParseRelayToolCall", () => {
     expect(prompt).toContain("TOOL_CALL: <tool name>");
     expect(prompt).toContain("city (required): City name");
     expect(prompt).toContain("Only use tools from this list");
+    expect(prompt).toContain("complete, self-contained final answer");
+    expect(prompt).toContain("emit the call immediately");
   });
   it("parses the first call once when the model duplicates the payload", () => {
     const payload = '{"relay_tool_call":{"name":"cron","arguments":{"action":"add"}}}';

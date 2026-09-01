@@ -5,6 +5,7 @@ import { errorHandler } from "./middleware/error-handler";
 import chat from "./routes/chat";
 import files from "./routes/files";
 import models from "./routes/models";
+import responses from "./routes/responses";
 import type { Env, Variables } from "./types/env";
 
 const app = new Hono<{ Bindings: Env; Variables: Variables }>();
@@ -21,6 +22,7 @@ app.use(
       "Authorization",
       "X-Clerk-User-Id",
       "OpenAI-Beta",
+      "X-Conversation-Id",
     ],
   }),
 );
@@ -30,7 +32,7 @@ app.get("/", (c) =>
     name: "chatplayground",
     description:
       "OpenAI-compatible relay for chatplayground.ai (BYOK, stateless).",
-    endpoints: ["/v1/models", "/v1/chat/completions", "/v1/files"],
+    endpoints: ["/v1/models", "/v1/chat/completions", "/v1/responses", "/v1/files"],
   }),
 );
 
@@ -38,6 +40,7 @@ app.get("/", (c) =>
 app.use("/v1/*", auth);
 app.route("/", models);
 app.route("/", chat);
+app.route("/", responses);
 app.route("/", files);
 
 export default app;

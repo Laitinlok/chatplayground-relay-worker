@@ -33,6 +33,8 @@ interface UpstreamBodyBase {
   fileUrl: null;
   botId: string; // short id, e.g. "gemini-3-flash"
   noSave: boolean;
+  reasoning_effort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
+  verbosity?: "low" | "medium" | "high";
 }
 
 // /api/chat/azure — model is the full slug; no apiKey field.

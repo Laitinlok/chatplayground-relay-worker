@@ -48,6 +48,19 @@ describe("buildUpstreamRequest — field mapping", () => {
     expect(body.botId).toBe("gpt-5.5");
   });
 
+  it("splits messages at the upstream 15,000-character limit", () => {
+    const content = "a".repeat(15_001);
+    const { body } = buildUpstreamRequest(
+      { model: "gpt-5.5", messages: [{ role: "user", content }] },
+      AZURE_MODEL,
+    );
+    expect(body.messages).toHaveLength(2);
+    expect(body.messages[0]?.content).toHaveLength(15_000);
+    expect(body.messages[1]?.content).toBe("a");
+    expect(body.messages.map((message) => message.content).join(""))
+      .toBe(content);
+  });
+
   it("serializes tool-call history using the injected text protocol", () => {
     const { body } = buildUpstreamRequest(
       {
@@ -70,6 +83,19 @@ describe("buildUpstreamRequest — field mapping", () => {
     expect(body.messages[0]?.content).toBe('TOOL_CALL: cron\nARGUMENTS: {"action":"add"}');
     expect(body.messages[1]?.content).toContain("[Tool Result]\ncreated");
   });
+  it("forwards GPT reasoning controls to the upstream body", () => {
+    const { body } = buildUpstreamRequest(
+      {
+        model: "gpt-5.5",
+        messages: [{ role: "user", content: "solve this" }],
+        reasoning_effort: "high",
+        verbosity: "low",
+      },
+      AZURE_MODEL,
+    );
+    expect(body).toMatchObject({ reasoning_effort: "high", verbosity: "low" });
+  });
+
   it("maps metadata.save -> !noSave and user -> chatId", () => {
     const { body } = buildUpstreamRequest(
       {

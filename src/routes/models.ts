@@ -15,6 +15,16 @@ models.get("/v1/models", async (c) => {
       object: "model",
       created,
       owned_by: m.provider,
+      ...(m.context_window !== undefined && {
+        context_window: m.context_window,
+      }),
+      ...(m.max_output_tokens !== undefined && {
+        max_output_tokens: m.max_output_tokens,
+      }),
+      ...(m.supports_tools !== undefined && {
+        supports_tools: m.supports_tools,
+      }),
+      ...(m.omniroute !== undefined && { omniroute: m.omniroute }),
     })),
   };
   return c.json(list);

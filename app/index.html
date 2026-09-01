@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f4f1ea">
+  <title>Relay Studio</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar" id="sidebar">
+      <div class="brand"><span class="brand-mark">R</span><span>Relay Studio</span></div>
+      <button class="new-chat" id="newChat" type="button"><span aria-hidden="true">+</span> New conversation</button>
+      <nav class="nav-list" aria-label="Primary">
+        <button class="nav-item active" type="button" data-view="chat"><span>Chat history</span><span class="nav-count" id="historyCount">0</span></button>
+      </nav>
+      <div class="sidebar-results">
+        <div class="sidebar-section-title">Conversations</div>
+        <div id="historyList" class="result-list"><span class="muted">Your prompts will appear here.</span></div>
+      </div>
+      <div class="sidebar-spacer"></div>
+      <div class="connection-card">
+        <span class="status-dot" id="statusDot"></span>
+        <div><strong id="connectionLabel">Not connected</strong><small id="connectionDetail">Add your relay endpoint</small></div>
+      </div>
+      <button class="settings-link" id="openSettings" type="button">Settings</button>
+    </aside>
+
+    <main class="main-content">
+      <header class="topbar">
+        <button class="icon-button menu-button" id="openSidebar" type="button" aria-label="Open navigation">Menu</button>
+        <div class="topbar-title"><span>Workspace</span><strong>New conversation</strong></div>
+
+        <button class="icon-button" id="themeToggle" type="button" aria-label="Toggle dark mode">Dark mode</button>
+        <button class="icon-button" id="toggleViewpoint" type="button" aria-label="Show or hide the viewpoint panel" aria-pressed="false">Viewpoint</button>
+        <button class="icon-button" id="topSettings" type="button" aria-label="Open settings">Settings</button>
+      </header>
+
+      <section class="workspace">
+        <div class="welcome" id="welcome">
+          <p class="eyebrow">Multi-model workspace</p>
+          <h1>Ask once.<br><em>Compare clearly.</em></h1>
+          <p class="welcome-copy">Bring several AI perspectives together, then let a chosen model synthesize the answer with sources and tool context.</p>
+          <div class="starter-grid">
+            <button class="starter" data-prompt="Compare the strongest approaches to this problem and explain the tradeoffs."><span>Compare approaches</span><small>Get several perspectives</small></button>
+            <button class="starter" data-prompt="Research the latest information about this topic and cite the most useful sources."><span>Research a topic</span><small>Use current sources</small></button>
+            <button class="starter" data-prompt="Review this idea critically. Identify risks, assumptions, and a practical next step."><span>Review an idea</span><small>Find gaps quickly</small></button>
+          </div>
+        </div>
+
+        <div class="content-layout">
+          <div class="conversation" id="conversation" aria-live="polite"></div>
+          <aside class="viewpoint-panel" id="viewpointPanel" aria-label="Combined and compared viewpoints">
+            <div class="viewpoint-panel-header">
+              <div><p class="eyebrow">Selected insight</p><h2 id="viewpointTitle">No viewpoint selected</h2></div>
+              <button class="close-viewpoint" id="closeViewpoint" type="button" aria-label="Close viewpoint">Close</button>
+            </div>
+            <div class="viewpoint-content" id="viewpointContent">Use Combine or Compare to create a synthesized viewpoint.</div>
+            <button class="action-button viewpoint-reply" id="replyViewpoint" type="button" disabled>Reply to this viewpoint</button>
+            <div class="viewpoint-list" id="resultList"></div>
+          </aside>
+        </div>
+
+        <section class="composer-wrap">
+          <div class="model-strip">
+            <div class="strip-heading"><span>Models</span><button id="refreshModels" type="button">Refresh</button></div>
+            <div class="model-list" id="modelList"><span class="muted">Connect a relay to load models.</span></div>
+          </div>
+          <div class="composer">
+            <textarea id="prompt" rows="2" placeholder="Ask anything across your selected models..." aria-label="Message"></textarea>
+            <div class="composer-footer">
+              <div class="composer-tools">
+                <button class="tool-toggle" id="searchToggle" type="button" aria-pressed="false"><span class="toggle-dot"></span> Web search</button>
+                <button class="tool-toggle" id="mcpToggle" type="button" aria-pressed="false"><span class="toggle-dot"></span> MCP tools</button>
+                <label class="attach-button" for="fileInput">Attach</label><input id="fileInput" type="file" accept="image/*,.txt,.md,.pdf" hidden>
+              </div>
+              <button class="action-button" id="compareButton" type="button">Compare</button>
+              <button class="action-button" id="combineButton" type="button">Combine</button>
+              <button class="send-button" id="sendButton" type="button"><span>Ask</span><span aria-hidden="true">&#8593;</span></button>
+            </div>
+          </div>
+          <p class="composer-note">Responses are generated by your configured relay. Review tool requests before approving them.</p>
+        </section>
+      </section>
+    </main>
+  </div>
+
+  <dialog class="settings-dialog" id="settingsDialog">
+    <form method="dialog" id="settingsForm">
+      <div class="dialog-header"><div><p class="eyebrow">Connection</p><h2>Relay settings</h2></div><button class="close-button" value="cancel" aria-label="Close settings">Close</button></div>
+      <label>Relay base URL<input id="relayUrl" type="url" placeholder="https://your-relay.workers.dev" autocomplete="url"></label>
+      <label>API key or Clerk user ID<input id="relayKey" type="password" placeholder="Saved locally on this device" autocomplete="off"></label>
+      <label>Synthesis model<select id="synthesisModel"><option value="">Use the first selected model</option></select></label>
+      <label>MCP servers <span class="label-hint">Optional JSON array</span><textarea id="mcpServers" rows="4" placeholder="[{\"name\":\"files\",\"url\":\"https://example.com/mcp\"}]" autocomplete="off"></textarea></label>
+      <p class="mcp-status" id="mcpStatus">Embedded DuckDuckGo MCP is ready.</p>
+      <p class="security-note">Credentials are saved locally on this device and are sent only to the relay URL you provide. DuckDuckGo search uses the embedded MCP adapter. Additional MCP servers should be trusted, allowlisted endpoints.</p>
+      <div class="dialog-actions"><button class="secondary-button" value="cancel">Cancel</button><button class="primary-button" id="saveSettings" value="default">Save and connect</button></div>
+    </form>
+  </dialog>
+  <script src="./app.js" type="module"></script>
+</body>
+</html>

@@ -23,12 +23,14 @@ import {
   collectUpstream,
   formatCitations,
   inlineCitationLinks,
+  splitReasoningContent,
   streamUpstreamAsOpenAI,
   streamUpstreamWithToolShim,
 } from "../utils/upstream-stream";
 import {
-  hasTools,
+  injectReasoningPrompt,
   injectToolPrompt,
+  normalizeOpenAITools,
   tryParseRelayToolCall,
 } from "../utils/tool-shim";
 
@@ -84,11 +86,21 @@ chat.post("/v1/chat/completions", async (c) => {
     }
   }
 
-// Prompt-injection tool-calling shim: inject exactly one authoritative
-// tool prompt, then parse the model's reply back into OpenAI tool_calls.
-  const toolsRequested = hasTools(body.tools);
+  // Agora's built-in OpenAI provider sends reasoning_effort for GPT-5/o-series
+  // only when Thinking is enabled. Mirror that explicit signal into the
+  // upstream prompt. Default to medium so providers that ignore
+  // reasoning_effort still receive an explicit thinking instruction.
+  const reasoningEffort = body.reasoning_effort ?? "medium";
+  body.reasoning_effort = reasoningEffort;
+  body.messages = injectReasoningPrompt(body.messages, reasoningEffort);
+
+  // Prompt-injection tool-calling shim: inject exactly one authoritative
+  // tool prompt, then parse the model's reply back into OpenAI tool_calls.
+  const requestedTools = normalizeOpenAITools(body.tools);
+  const toolsRequested = requestedTools.length > 0;
   if (toolsRequested) {
-    body.messages = injectToolPrompt(body.messages, body.tools!, body.tool_choice);
+    body.tools = requestedTools;
+    body.messages = injectToolPrompt(body.messages, requestedTools, body.tool_choice);
   }
 
   const { endpoint, body: upstreamBody } = buildUpstreamRequest(body, model);
@@ -102,9 +114,11 @@ chat.post("/v1/chat/completions", async (c) => {
   });
 
   if (!upstream.ok || !upstream.body) {
+    const upstreamDetail = await upstream.text().catch(() => "");
+    const detail = upstreamDetail.trim().slice(0, 500);
     throw upstreamError(
       upstream.status,
-      `Upstream returned ${upstream.status}. Most likely cause: invalid X-Clerk-User-Id, unsupported model, or upstream outage.`,
+      `Upstream returned ${upstream.status}${detail ? `: ${detail}` : ". Most likely cause: invalid X-Clerk-User-Id, unsupported model, or upstream outage."}`,
     );
   }
 
@@ -166,13 +180,13 @@ chat.post("/v1/chat/completions", async (c) => {
     return Response.json(toolResponse);
   }
 
-  // Non-streaming path: inline-rewrite [N] citation markers as Markdown links
-  // and append a sources block. Usage stays based on raw model output so the
-  // relay-added link formatting doesn't inflate completion_tokens.
+  // Expose reasoning separately so Agora renders a collapsible thought block
+  // instead of showing raw <think> tags in the assistant answer.
+  const split = splitReasoningContent(rawContent);
   const content =
     citations.length === 0
-      ? rawContent
-      : inlineCitationLinks(rawContent, citations) +
+      ? split.content
+      : inlineCitationLinks(split.content, citations) +
         formatCitations(citations);
 
   const response: ChatCompletionResponse = {
@@ -183,7 +197,13 @@ chat.post("/v1/chat/completions", async (c) => {
     choices: [
       {
         index: 0,
-        message: { role: "assistant", content },
+        message: {
+          role: "assistant",
+          content,
+          ...(split.reasoningContent
+            ? { reasoning_content: split.reasoningContent }
+            : {}),
+        },
         finish_reason: "stop",
       },
     ],

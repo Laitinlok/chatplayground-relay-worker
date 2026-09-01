@@ -11,7 +11,10 @@
     "lint": "biome lint src/",
     "check": "biome check src/",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "native:dev": "npx tauri dev --config src-tauri/tauri.conf.json",
+    "native:build:linux": "npx tauri build --config src-tauri/tauri.conf.json --bundles appimage",
+    "native:build:android": "npx tauri android build --apk"
   },
   "keywords": [
     "cloudflare",
@@ -26,10 +29,11 @@
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.2",
-    "@cloudflare/vitest-pool-workers": "^0.18.2",
-    "@cloudflare/workers-types": "^4.20250701.0",
+    "@cloudflare/vitest-pool-workers": "^0.18.8",
+    "@cloudflare/workers-types": "^5.20260722.1",
+    "@tauri-apps/cli": "^2.11.4",
     "typescript": "^5.9.3",
     "vitest": "^4.1.10",
-    "wrangler": "^4.107.1"
+    "wrangler": "^4.114.0"
   }
 }

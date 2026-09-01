@@ -45,11 +45,18 @@ export interface ChatCompletionRequest {
   stop?: string | string[];
   presence_penalty?: number;
   frequency_penalty?: number;
+  reasoning_effort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
+  verbosity?: "low" | "medium" | "high";
 }
 
 export interface ChatCompletionChoice {
   index: number;
-  message: { role: "assistant"; content: string | null; tool_calls?: OpenAIMessage["tool_calls"] };
+  message: {
+    role: "assistant";
+    content: string | null;
+    reasoning_content?: string;
+    tool_calls?: OpenAIMessage["tool_calls"];
+  };
   finish_reason: "stop" | "tool_calls";
 }
 
@@ -71,6 +78,7 @@ export interface ChatCompletionResponse {
 export interface ChatCompletionChunkDelta {
   role?: "assistant";
   content?: string;
+  reasoning_content?: string;
   tool_calls?: Array<{
     index: number;
     id: string;
@@ -98,6 +106,16 @@ export interface ModelListItem {
   object: "model";
   created: number;
   owned_by: string;
+  context_window?: number;
+  max_output_tokens?: number;
+  supports_tools?: boolean;
+  omniroute?: {
+    task_fit: Record<string, number>;
+    price_per_million_tokens: {
+      input: number;
+      output: number;
+    };
+  };
 }
 
 export interface ModelList {

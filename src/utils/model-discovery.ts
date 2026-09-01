@@ -1,5 +1,9 @@
 import { toEndpoint } from "../constants/endpoints";
-import { SEED_MODELS, type ModelEntry } from "../constants/models";
+import {
+  applyModelProfile,
+  SEED_MODELS,
+  type ModelEntry,
+} from "../constants/models";
 import { DISCOVERY_TIMEOUT } from "../constants/timeouts";
 
 const CACHE_KEY = "models:v3"; // v3: switched to /api/models JSON; gained `endpoint`
@@ -23,8 +27,9 @@ export async function getModels(env: DiscoveryEnv): Promise<ModelEntry[]> {
   if (env.MODEL_CACHE) {
     const cached = await env.MODEL_CACHE.get<ModelEntry[]>(CACHE_KEY, "json");
     if (cached && cached.length > 0) {
-      memCache = { at: Date.now(), data: cached };
-      return cached;
+      const profiled = cached.map(applyModelProfile);
+      memCache = { at: Date.now(), data: profiled };
+      return profiled;
     }
   }
 
@@ -76,14 +81,14 @@ async function discover(chatUrl: string): Promise<ModelEntry[]> {
     const upstreamModel = e.modelName.includes("/")
       ? e.modelName
       : `${provider}/${e.modelName}`;
-    out.push({
+    out.push(applyModelProfile({
       id: e.botId,
       modelName: e.modelName,
       upstreamModel,
       upstreamBotId: e.botId,
       provider,
       endpoint: toEndpoint(e.endpoint),
-    });
+    }));
   }
   return out;
 }
