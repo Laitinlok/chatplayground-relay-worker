@@ -20,7 +20,6 @@ app.use(
     allowHeaders: [
       "Content-Type",
       "Authorization",
-      "X-Clerk-User-Id",
       "OpenAI-Beta",
       "X-Conversation-Id",
     ],
@@ -36,7 +35,7 @@ app.get("/", (c) =>
   }),
 );
 
-// All /v1/* requires a valid Clerk user_id as Bearer or X-Clerk-User-Id.
+// All /v1/* requires a valid Clerk session JWT as Bearer.
 app.use("/v1/*", auth);
 app.route("/", models);
 app.route("/", chat);

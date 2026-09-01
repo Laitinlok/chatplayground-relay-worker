@@ -10,21 +10,21 @@ import { invalidRequest, modelNotFound, upstreamError } from "../utils/errors";
 import { getModels } from "../utils/model-discovery";
 import { findModel } from "../utils/model-id";
 import {
-	buildUpstreamHeaders,
-	buildUpstreamRequest,
-	endpointUrl,
+  buildUpstreamHeaders,
+  buildUpstreamRequest,
+  endpointUrl,
 } from "../utils/upstream-request";
 import {
-	collectUpstream,
-	formatCitations,
-	inlineCitationLinks,
-	splitReasoningContent,
+  collectUpstream,
+  formatCitations,
+  inlineCitationLinks,
+  splitReasoningContent,
 } from "../utils/upstream-stream";
 import {
-	hasTools,
-	injectReasoningPrompt,
-	injectToolPrompt,
-	tryParseRelayToolCall,
+  hasTools,
+  injectReasoningPrompt,
+  injectToolPrompt,
+  tryParseRelayToolCall,
 } from "../utils/tool-shim";
 
 const responses = new Hono<{ Bindings: Env; Variables: Variables }>();
@@ -192,7 +192,7 @@ responses.post("/v1/responses", async (c) => {
 	const { endpoint, body } = buildUpstreamRequest(request, model);
 	const upstream = await fetch(endpointUrl(endpoint, c.env.UPSTREAM_CHAT_URL), {
 		method: "POST",
-		headers: buildUpstreamHeaders(c.get("clerkUserId"), c.env),
+        headers: buildUpstreamHeaders(await c.get("sessionToken")(), c.env),
 		body: JSON.stringify(body),
 		signal: AbortSignal.timeout(CHAT_TIMEOUT),
 	});

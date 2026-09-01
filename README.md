@@ -5,9 +5,9 @@
 
 ## What it does
 
-Wraps chatplayground.ai's internal chat endpoint as standard OpenAI
-`/v1/chat/completions` and `/v1/responses` APIs, so OpenAI-compatible clients
-can use chatplayground's chat models with your existing chatplayground account.
+Wraps chatplayground.ai's internal chat endpoint as a standard OpenAI
+`/v1/chat/completions` API, so any OpenAI-compatible client can use
+chatplayground's chat models with your existing chatplayground account.
 
 ```
 OpenAI SDK ──► Cloudflare Worker ──► chatplayground.ai
@@ -25,55 +25,90 @@ where possible):
 - chatplayground changes endpoint paths or request shape
 - chatplayground tightens authentication on their internal endpoint
 - chatplayground changes the `/api/models` shape in a way that breaks discovery
-  (falls back to a small SEED list on failure)
+  (`/v1/models` and chat then return 503 until it recovers)
 
-## Authentication: bring your own Clerk user ID
+## Authentication: bring your own Clerk session token
 
-You provide your chatplayground Clerk user ID (looks like `user_xxxxxxxxxxxxx`)
-as the OpenAI-style Bearer token. The worker forwards it to upstream as
-`X-Clerk-User-Id`.
+Upstream authenticates with a **Clerk session token** — a JWT you send as the
+OpenAI-style Bearer token, forwarded verbatim as `Authorization: Bearer <jwt>`.
+(The old `X-Clerk-User-Id` header no longer works: `/api/chat/*` 401s on it.)
 
-**How to find your Clerk user ID:**
+**How to find your session token:**
 
 1. Open <https://web.chatplayground.ai/> and sign in
 2. Open DevTools → Network tab
 3. Send any message in the UI
 4. Find the request to `/api/chat/azure`
-5. Copy the value of the `X-Clerk-User-Id` request header
+5. Copy the `Authorization` header value (the `eyJ...` JWT)
 
-> ⚠️ **Treat your Clerk user ID like an API key.**
-> It grants access to your chatplayground account quota.
-> Don't share it. Don't post your worker URL publicly without thinking.
+> ⚠️ **These tokens expire 60 seconds after Clerk issues them.**
+> A copy-pasted JWT is fine for one `curl`, useless for a long-lived client.
+> For anything ongoing use gateway mode below, which mints a fresh token per
+> request from a cookie that lasts months.
 
-### Optional: gateway mode (custom API key, hidden Clerk ID)
+> ⚠️ **Treat the token like an API key.** It grants access to your
+> chatplayground account quota for as long as it lives.
 
-Passthrough mode hands your Clerk ID to every client. If you'd rather keep the
-Clerk ID server-side and give callers a custom key you can rotate, set two
-secrets:
+### Gateway mode (custom API key, auto-refreshing credential)
+
+Because a session JWT dies in 60 seconds, it cannot be stored as a secret. What
+*can* be stored is Clerk's `__client` cookie; the worker mints a fresh session
+token from it exactly as the web app does (cached per isolate, refreshed 15s
+before expiry). Set two secrets:
 
 ```bash
-wrangler secret put CLERK_USER_ID    # your real user_... identity
-wrangler secret put RELAY_API_KEY    # a key you invent, e.g. sk-relay-xxxxx
+wrangler secret put CLERK_CLIENT_COOKIE  # value of the `__client` cookie
+wrangler secret put RELAY_API_KEY        # a key you invent, e.g. sk-relay-xxxxx
 ```
 
+**Where the cookie comes from:** DevTools → Application → Cookies →
+`https://clerk.chatplayground.ai` → copy `__client`.
+
+The session id is *not* configured. It cannot be decoded out of the cookie
+(which holds only `id` + `rotating_token`), so the worker asks Clerk for it —
+`GET /v1/client` → the active session, resolved once per isolate and cached
+alongside the token. That also means a new session on the same client is picked
+up on its own, where a pinned `sess_...` would have gone stale.
+
 Once `RELAY_API_KEY` is set, callers authenticate with **that** key
-(`Authorization: Bearer sk-relay-xxxxx`) and the worker uses the stored
-`CLERK_USER_ID` upstream — the real identity is never exposed. Unset the secret
-to fall back to passthrough. (Secrets, not `wrangler.jsonc` vars — vars are
-plaintext.)
+(`Authorization: Bearer sk-relay-xxxxx`) and never see the real credential.
+Unset it to fall back to passthrough. (Secrets, not `wrangler.jsonc` vars —
+vars are plaintext.)
+
+#### How long does the cookie last?
+
+Ignore the expiry date the browser shows on it — that is the browser's own
+`Expires` attribute, and the value you copied is a JWT with **no `exp` claim**:
+
+```json
+{ "id": "client_xxxxxxxx", "rotating_token": "r0cm2k7z..." }
+```
+
+Validity is decided server-side by Clerk's client record and that
+`rotating_token`, so the cookie does not die of old age — it dies when Clerk
+**rotates** it (sign-out, re-sign-in, handshake events). Minting session tokens
+does not rotate it; that was checked against the live API.
+
+When Clerk *does* rotate, it returns the replacement in `Set-Cookie`, and the
+worker writes it to KV (`clerk:client_cookie`) so the next isolate uses the live
+value instead of the dead secret. **That survival depends on the `MODEL_CACHE`
+KV binding being enabled** — see [KV-backed model cache](#kv-backed-model-cache).
+Without it, a rotation means gateway mode 401s until you re-capture the cookie
+by hand. A stale KV copy is self-healing: it's dropped and the secret retried
+once, so re-running `wrangler secret put CLERK_CLIENT_COOKIE` always takes
+effect.
 
 ## Features
 
 | Endpoint | Notes |
 |---|---|
 | `POST /v1/chat/completions` | Stream + non-stream; multimodal (`image_url` content parts) |
-| `POST /v1/responses` | Responses API envelope; GPT-5.6-style input, streaming, and function-call items |
 | `GET /v1/models` | Dynamic discovery from chatplayground's `/api/models`, KV + memory cached; `premiumOnly` models hidden unless `PREMIUM_MODELS="true"` |
 | `POST /v1/files` | Image upload proxy → returns a URL usable as `image_url.url` |
 
 | Not supported | Why |
 |---|---|
-| Tool / function calling | Supported through the relay's structured prompt shim; native upstream tool execution is not available |
+| Tool / function calling | No upstream chat endpoint exposes tool use |
 | `/v1/images/generations` | Upstream image-gen models live on a different endpoint |
 | `/v1/embeddings` | Upstream doesn't expose embeddings |
 | `/v1/audio/*` | Upstream doesn't expose audio |
@@ -83,22 +118,47 @@ plaintext.)
 chatplayground serves chat models from **three upstream endpoints**
 (`azure` / `perplexity` / `lmsys`), routed by model `botId`. The relay mirrors
 that routing automatically, so a single OpenAI `model` field reaches the right
-one. It exposes **every chat-group model** in the feed — including models
-chatplayground marks `active:false` (hidden in their UI but still callable
-upstream, e.g. perplexity `sonar-pro`).
+one. Models chatplayground marks `active:false` are still exposed — that flag
+is UI visibility only, and inactive models remain callable upstream.
 
-Some commonly-available ids (call `GET /v1/models` for the live set):
+Models the feed marks `premiumOnly` are **hidden from `GET /v1/models` by
+default**, because upstream returns 403 for them without a premium plan; set
+`PREMIUM_MODELS="true"` to list them anyway. Everything else is shown,
+including the three models flagged `lifetimeOnly` — see the caveats for what
+that flag is and isn't known to do. Hidden models stay callable either way:
+the filter only changes what the relay advertises, and upstream remains the
+thing that enforces access.
 
-| Model id (use this in `model` field) | Provider | Endpoint | Vision |
-|---|---|---|---|
-| `gpt-5.5` | openai | azure | ✅ |
-| `gpt-5.4` | openai | azure | ✅ |
-| `gemini-3-flash` | google | azure | ✅ |
-| `claude-haiku-4-5` | anthropic | azure | ✅ |
-| `deepseek-v4-pro` | deepseek | azure | — |
-| `kimi-k2.6` | moonshot | azure | — |
-| `perplexity-sonar-pro` | perplexity | perplexity | — |
-| `llama-4-scout` | meta | lmsys | ✅ |
+Snapshot of the feed (call `GET /v1/models` for the live set):
+
+| Model id (use this in `model` field) | Provider | Endpoint | Vision | Access |
+|---|---|---|---|---|
+| `gpt-5.6-terra` | openai | azure | ✅ | — |
+| `gpt-5.6-luna` | openai | azure | ✅ | — |
+| `mistral-large-3` | mistral | azure | ✅ | — |
+| `deepseek-v4-pro` | deepseek | azure | — | — |
+| `deepseek-v4-flash` | deepseek | azure | — | — |
+| `deepseek-r1` | deepseek | azure | — | — |
+| `llama-4-scout` | meta | lmsys | ✅ | — |
+| `llama-4-maverick` | meta | lmsys | ✅ | — |
+| `grok-4.5` | xai | lmsys | ✅ | — |
+| `qwen3.7-plus` | qwen | lmsys | ✅ | — |
+| `minimax-m3` | minimax | lmsys | ✅ | — |
+| `command-a` | cohere | lmsys | ✅ | — |
+| `perplexity-sonar` | perplexity | perplexity | ✅ | — |
+| `claude-sonnet-4-6` | anthropic | azure | ✅ | lifetime |
+| `gemini-3.5-flash-lite` | google | azure | ✅ | lifetime |
+| `kimi-k2.6` | kimi | azure | ✅ | lifetime |
+| `claude-opus-5` | anthropic | azure | ✅ | premium |
+| `claude-sonnet-5` | anthropic | azure | ✅ | premium |
+| `gpt-5.6-sol` | openai | azure | ✅ | premium |
+| `gemini-3.1-pro` | google | azure | ✅ | premium |
+| `grok-4.6` | xai | lmsys | ✅ | premium |
+| `perplexity-sonar-pro` | perplexity | perplexity | ✅ | premium |
+
+`lifetime` = the feed's `lifetimeOnly` flag; those need a lifetime plan but
+are **not** `premiumOnly`, so they are listed by default. Truncated — the feed
+carried 33 chat models when this was written, 12 of them `premiumOnly`.
 
 > Perplexity models return a structured citation list at the end of the
 > stream. The relay strips that raw payload and re-emits the URLs as a
@@ -118,18 +178,46 @@ npm run dev
 # → http://localhost:8787
 ```
 
+No secrets are needed to run it: auth is BYOK, the caller supplies the session
+token. Copy `.dev.vars.example` to `.dev.vars` only if you want to point local dev
+at a different upstream.
+
 ### Deploy to Cloudflare
 
 ```bash
+npx wrangler login     # opens a browser; needed once per machine
 npm run deploy
 # → https://chatplayground-relay.<your-account>.workers.dev
 ```
 
-### Optional: KV-backed model cache
+Then smoke-test it — this is the fastest way to tell a broken deploy from a
+broken upstream:
 
-Without KV, model discovery falls back to a 5-minute per-isolate memory cache
-plus a hardcoded SEED fallback list. That's fine for personal use. For shared
-deployments you can add KV:
+```bash
+curl -s https://chatplayground-relay.<acct>.workers.dev/v1/models \
+     -H "Authorization: Bearer eyJYOUR.SESSION.JWT" | jq '.data | length'
+```
+
+A number is a working deploy. `503 model_discovery_failed` means the worker is
+up but couldn't reach the upstream feed. `401` means the Bearer token isn't a
+well-formed JWT.
+
+Two optional follow-ups, in the order they usually matter:
+
+**Gateway mode** — if anyone but you will call it, set the two secrets from
+[gateway mode](#gateway-mode-custom-api-key-auto-refreshing-credential) so
+callers get a stable key and the credential refreshes itself.
+
+**`PREMIUM_MODELS`** — leave it unset unless the account has premium; see
+[Configuration](#configuration).
+
+### KV-backed model cache
+
+The `MODEL_CACHE` namespace does double duty: the model registry, and the
+rotated `__client` cookie in gateway mode. There is no hardcoded fallback list,
+so without KV a discovery failure is a 503, every cold isolate refetches the
+feed, and a Clerk cookie rotation has to be repaired by hand. A single-user
+deploy survives that fine; gateway mode and anything shared should add KV:
 
 ```bash
 npx wrangler kv namespace create MODEL_CACHE
@@ -142,7 +230,7 @@ npx wrangler kv namespace create MODEL_CACHE
 
 ```bash
 export WORKER=https://chatplayground-relay.<acct>.workers.dev
-export KEY=user_YOUR_CLERK_ID
+export KEY=eyJYOUR.SESSION.JWT
 
 # List models
 curl -s $WORKER/v1/models -H "Authorization: Bearer $KEY" | jq
@@ -151,13 +239,13 @@ curl -s $WORKER/v1/models -H "Authorization: Bearer $KEY" | jq
 curl -s $WORKER/v1/chat/completions \
      -H "Authorization: Bearer $KEY" \
      -H "Content-Type: application/json" \
-     -d '{"model":"gpt-5.5","messages":[{"role":"user","content":"say hi"}]}' | jq
+     -d '{"model":"gpt-5.6-luna","messages":[{"role":"user","content":"say hi"}]}' | jq
 
 # Streaming
 curl -N $WORKER/v1/chat/completions \
      -H "Authorization: Bearer $KEY" \
      -H "Content-Type: application/json" \
-     -d '{"model":"gemini-3-flash","messages":[{"role":"user","content":"count to 5"}],"stream":true}'
+     -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"count to 5"}],"stream":true}'
 ```
 
 ### OpenAI Python SDK
@@ -167,43 +255,28 @@ from openai import OpenAI
 
 client = OpenAI(
     base_url="https://chatplayground-relay.<acct>.workers.dev/v1",
-    api_key="user_YOUR_CLERK_ID",
+    api_key="eyJYOUR.SESSION.JWT",
 )
 
 # Text
 resp = client.chat.completions.create(
-    model="gpt-5.5",
+    model="gpt-5.6-luna",
     messages=[{"role": "user", "content": "What is use-after-free?"}],
 )
 print(resp.choices[0].message.content)
 
 # Streaming
 for chunk in client.chat.completions.create(
-    model="gpt-5.5",
+    model="gpt-5.6-luna",
     messages=[{"role": "user", "content": "Count to 5"}],
     stream=True,
 ):
     print(chunk.choices[0].delta.content or "", end="", flush=True)
 
-# Responses API, including function tools
-resp = client.responses.create(
-    model="gpt-5.6",
-    input="Find the latest status",
-    tools=[{
-        "type": "function",
-        "name": "web_search",
-        "description": "Search the web",
-        "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
-    }],
-)
-print(resp.output_text)
-# When the model requests a tool, inspect resp.output for type="function_call",
-# execute it in your application, then send function_call_output in the next input.
-
 # Vision — upload via /v1/files, then reference
 file = client.files.create(file=open("photo.jpg", "rb"), purpose="vision")
 resp = client.chat.completions.create(
-    model="gemini-3-flash",
+    model="llama-4-scout",
     messages=[{
         "role": "user",
         "content": [
@@ -220,7 +293,7 @@ print(resp.choices[0].message.content)
 Add a custom OpenAI-compatible provider:
 
 - **API host / base URL**: `https://chatplayground-relay.<acct>.workers.dev/v1`
-- **API key**: your `user_xxxxxxxx` Clerk ID
+- **API key**: your Clerk session JWT (or the gateway key)
 - **Model**: any id from `GET /v1/models`
 
 ### Continuing a chatplayground-side conversation
@@ -247,17 +320,16 @@ caller (OpenAI SDK)
   │  Authorization: Bearer user_xxxxx
   ▼
 Cloudflare Worker (Hono)
-  ├── middleware/auth          → extract Clerk user_id from Bearer / X-Clerk-User-Id
+  ├── middleware/auth          → Bearer session JWT (or gateway key → mint one)
   ├── middleware/error-handler → wrap thrown errors in OpenAI envelope
-  ├── routes/chat              → translate chat completions, stream back
-  ├── routes/responses         → translate Responses input/output and tool items
+  ├── routes/chat              → translate body, fetch upstream, stream back
   ├── routes/models            → live discovery + 3-layer cache
   └── routes/files             → forward multipart to temp-file-host
                 │
                 │  POST app.chatplayground.ai/api/chat/{azure|perplexity|lmsys}
                 │       (endpoint chosen per model botId)
                 │  Content-Type: text/plain;charset=UTF-8
-                │  X-Clerk-User-Id: <forwarded>
+                │  Authorization: Bearer <session jwt>
                 ▼
        chatplayground upstream
                 │  text/plain stream + trailing "CHAT_ID:<cuid>" sentinel
@@ -271,13 +343,31 @@ Cloudflare Worker (Hono)
 
 1. **In-isolate memory cache** (5 min TTL) — hits if isolate is warm
 2. **KV cache** (1 h TTL) — hits across isolates if `MODEL_CACHE` binding is configured
+   (the same namespace also holds the rotated Clerk cookie under `clerk:client_cookie`)
 3. **Live discovery** — `GET app.chatplayground.ai/api/models` (public JSON,
    no auth), validate each entry (`{botId, modelName, provider, group,
-   endpoint, active}`), keep `group:"chat"`. The `active` flag is **not**
-   filtered on — it controls UI visibility only; inactive models are still
-   callable upstream. Each entry's `endpoint` field decides which of the three
-   `/api/chat/*` upstreams serves it.
-4. **SEED fallback** — small hardcoded list, used if discovery fails
+   endpoint, active, premiumOnly}`), keep `group:"chat"`. The `active` flag is
+   **not** filtered on — it controls UI visibility only; inactive models are
+   still callable upstream. Each entry's `endpoint` field decides which of the
+   three `/api/chat/*` upstreams serves it.
+If all three miss, the request fails with **503** `model_discovery_failed`.
+There is deliberately no hardcoded fallback list: it would be a copy of data
+that lives upstream, so it rots unnoticed and only gets used on the day
+discovery is already broken — and serving it turned "discovery is down" into a
+404 `model_not_found`, which tells callers a model doesn't exist when it does.
+
+`/api/models` is fetched **without** credentials: it is a public catalogue and
+returns the same bytes with or without one. Upstream ships the raw flags and
+lets its own frontend filter, so there is no per-account entitlement to query —
+which is why `PREMIUM_MODELS` is something you set rather than something the
+relay works out. Access is only observable by making a chat call and reading
+the 403, and a model listing shouldn't spend credits to find out.
+
+The registry cached at every layer is the **full** list. `premiumOnly` is
+filtered at read time in the `/v1/models` handler, so flipping
+`PREMIUM_MODELS` takes effect immediately rather than waiting out the 1 h KV
+TTL. Note the gate is `premiumOnly`, not the feed's `tier` field:
+`gemini-3.7-flash` is `tier:"basic"` and still 403s without premium.
 
 ## Project layout
 
@@ -285,14 +375,13 @@ Cloudflare Worker (Hono)
 src/
 ├── index.ts                  Hono app + CORS + auth + route mounting
 ├── constants/
-│   ├── models.ts             SEED fallback registry
+│   ├── models.ts             ModelEntry shape (no hardcoded list)
 │   └── timeouts.ts           CHAT / UPLOAD / DISCOVERY fetch timeouts
 ├── middleware/
-│   ├── auth.ts               Bearer / X-Clerk-User-Id → ctx.clerkUserId
+│   ├── auth.ts               Bearer JWT / gateway key → ctx.sessionToken
 │   └── error-handler.ts      → OpenAI error envelope
 ├── routes/
 │   ├── chat.ts               POST /v1/chat/completions
-│   ├── responses.ts          POST /v1/responses
 │   ├── models.ts             GET  /v1/models
 │   └── files.ts              POST /v1/files
 ├── types/
@@ -303,6 +392,7 @@ src/
     ├── errors.ts             OpenAIHTTPError class + factory helpers
     ├── model-id.ts           findModel(input, registry)
     ├── model-discovery.ts    /api/models fetch + validate + cache layers
+    ├── clerk-token.ts        gateway mode: __client cookie → 60s session JWT
     ├── upstream-request.ts   OpenAI → chatplayground body translator
     └── upstream-stream.ts    CHAT_ID sentinel strip + OpenAI SSE wrap
 ```
@@ -318,30 +408,58 @@ different upstream instance.
 | `UPSTREAM_ORIGIN` | `https://web.chatplayground.ai` | Forwarded as `Origin` |
 | `UPSTREAM_REFERER` | `https://web.chatplayground.ai/` | Forwarded as `Referer` |
 | `UPSTREAM_UPLOAD_URL` | `https://temp-file-host.chatplayground.ai/upload` | File upload endpoint |
+| `PREMIUM_MODELS` | unset | `"true"` lists `premiumOnly` models in `GET /v1/models`. Leave unset unless the account has premium — upstream 403s them otherwise. Any other value counts as off |
 
 Optional KV bindings:
 
 | Binding | Purpose |
 |---|---|
 | `MODEL_CACHE` | Cross-isolate model registry cache (1 h TTL) |
-| `CHAT_CACHE` | Optional upstream chat-session continuity cache (7 day TTL) |
 
 ## Caveats
 
-1. **Tool calling uses a compatibility shim.** chatplayground's upstream chat
-   endpoints do not expose native tool execution. The relay injects tool
-   instructions, parses the model's structured call, and returns a standard
-   `tool_calls` or Responses `function_call` item. Your application executes
-   the tool and sends its result in the next request.
+1. **No tool / function calling.** None of the upstream chat endpoints
+   (`azure` / `perplexity` / `lmsys`) support it — live-tested: injected
+   OpenAI `tools` are ignored and answered as prose, and a forced
+   `tool_choice` returns a plain-text error, never a structured `tool_calls`
+   reply. The relay also never forwards `tools` / `tool_choice` upstream.
 2. **No real usage counts.** chatplayground doesn't return token usage, so
    the `usage` field is estimated (chars ÷ 4). Don't bill on it.
-3. **Brittle to upstream changes.** Any change to `/api/models` shape, endpoint
+3. **Premium models 403 on a non-premium account.** The feed marks 12 of its
+   33 chat models `premiumOnly`; upstream rejects those unless the account has
+   premium. They're hidden from `GET /v1/models` by default but stay callable,
+   so a hardcoded id returns HTTP 403 `upstream_403` and upstream's own wording:
+
+   > This model is only available to active subscribers.
+
+   Note it says **active subscriber**, not "premium" or "advanced" — quote that
+   line at support rather than describing the symptom, it names their field.
+
+   The gate is `premiumOnly`, and not the feed's `tier` field:
+   `gemini-3.7-flash` is `tier:"basic"` and 403s anyway. All 33 chat models
+   were called once to establish this — every `premiumOnly:true` model was
+   rejected and every reachable `premiumOnly:false` one succeeded, no
+   exceptions. `creditWeight` is not the gate either (weight 7 succeeded while
+   weight 2 was rejected). Re-derive none of this from the flag names; the
+   feed's `active` flag, for instance, is enforced nowhere.
+4. **Upstream rate-limits bursts.** A run of back-to-back chat calls starts
+   returning `429 You're sending prompts too quickly`, with no `Retry-After`
+   header to pace against. The relay passes 429 through unchanged so the
+   client's own rate-limit backoff handles it.
+5. **`lifetimeOnly` is an unresolved flag.** Three models carry it
+   (`claude-sonnet-4-6`, `gemini-3.5-flash-lite`, `kimi-k2.6`). Only one was
+   ever tested, on one paid account, and it worked — which cannot distinguish
+   a real entitlement gate from a UI badge, the way `active` is one. It is
+   also not established that the flag refers to the same product as any given
+   "lifetime" plan. The relay does not read it: all three are
+   `premiumOnly:false`, so they are listed regardless of what it means.
+6. **Brittle to upstream changes.** Any change to `/api/models` shape, endpoint
    path, or request shape may break the worker. Open an issue / PR.
-4. **`/v1/files` is essentially anonymous.** chatplayground's upload
+7. **`/v1/files` is essentially anonymous.** chatplayground's upload
    endpoint accepts any caller (no auth), and our Bearer regex is a speed
    bump, not a gate. If you deploy publicly and care about your worker's
    request quota, add a size cap or remove the route.
-5. **Keep your Clerk user ID private.** It grants access to your
+8. **Keep your session token and `__client` cookie private.** They grant access to your
    chatplayground account quota; treat it like an API key.
 
 ## License

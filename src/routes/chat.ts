@@ -38,12 +38,19 @@ const chat = new Hono<{ Bindings: Env; Variables: Variables }>();
 
 const CHAT_CACHE_TTL_SECONDS = 60 * 60 * 24 * 7; // 7 days
 
-function chatCacheKey(
-  clerkUserId: string,
+async function chatCacheKey(
+  sessionToken: string,
   modelId: string,
   conversationId?: string,
-): string {
-  return `chat:${conversationId ?? `${clerkUserId}:${modelId}`}`;
+): Promise<string> {
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(sessionToken),
+  );
+  const sessionHash = Array.from(new Uint8Array(digest), (byte) =>
+    byte.toString(16).padStart(2, "0"),
+  ).join("");
+  return `chat:${conversationId ?? `${sessionHash}:${modelId}`}`;
 }
 
 async function loadCachedChatId(env: Env, key: string): Promise<string | null> {
@@ -75,13 +82,17 @@ chat.post("/v1/chat/completions", async (c) => {
   const model = findModel(body.model, registry);
   if (!model) throw modelNotFound(body.model);
 
-  const clerkUserId = c.get("clerkUserId");
+  const sessionToken = await c.get("sessionToken")();
 
   // Reuse a prior upstream chat when the client hasn't explicitly set `user`
   // and there's a cached chatId for this conversation. This avoids spending
   // a brand-new chatplayground chat (and quota) on every single request.
   const conversationId = c.req.header("x-conversation-id") ?? undefined;
-  const cacheKey = chatCacheKey(clerkUserId, model.id, conversationId);
+  const cacheKey = await chatCacheKey(
+    sessionToken,
+    model.id,
+    conversationId,
+  );
 
   if (!body.user) {
     const cachedChatId = await loadCachedChatId(c.env, cacheKey);
@@ -112,7 +123,7 @@ chat.post("/v1/chat/completions", async (c) => {
   console.log("UPSTREAM BODY:", JSON.stringify(upstreamBody));
   const upstream = await fetch(endpointUrl(endpoint, c.env.UPSTREAM_CHAT_URL), {
     method: "POST",
-    headers: buildUpstreamHeaders(clerkUserId, c.env),
+    headers: buildUpstreamHeaders(sessionToken, c.env),
     body: JSON.stringify(upstreamBody),
     signal: AbortSignal.timeout(CHAT_TIMEOUT),
   });
