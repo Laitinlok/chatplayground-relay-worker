@@ -288,6 +288,17 @@ export function buildToolSystemPrompt(
     parameters: t.function.parameters ?? { type: "object", properties: {} },
   }));
 
+  const decisionRules = forceLunaToolCall
+    ? [
+        "This request is in tool-call mode.",
+        "Before producing any answer, select the single best matching tool and emit its call immediately.",
+        "A direct prose answer is invalid in this mode.",
+      ]
+    : [
+        "If a tool is needed, emit the call immediately; do not preface it with statements such as 'I will search'.",
+        "If you are not calling a tool, respond with normal plain-text prose as usual.",
+      ];
+
   return [
     "You are running behind an OpenAI-compatible relay that has no native tool-calling support.",
     TOOL_PROMPT_SENTINEL,
@@ -299,15 +310,14 @@ export function buildToolSystemPrompt(
     `Example:\n${TOOL_CALL_EXAMPLES[0]}`,
     "Include every required parameter. Make one call at a time and wait for the tool result.",
     "After a tool result is provided, either answer the user directly or make the next necessary call.",
-    "If no further tool is needed, give a complete, self-contained final answer to the user's original request in this turn. Do not stop after a plan, acknowledgement, preamble, or a single incomplete sentence.",
-    "When a tool is needed, emit the call immediately; do not preface it with statements such as 'I will search'.",
+    "If no further tool is needed after a tool result, give a complete, self-contained final answer to the user's original request in this turn. Do not stop after a plan, acknowledgement, preamble, or a single incomplete sentence.",
+    ...decisionRules,
     "Do not wrap a tool call in markdown fences and do not add prose after its arguments.",
     `JSON envelope fallback (also accepted): ${TOOL_CALL_EXAMPLES[1]}`,
     "Call exactly one tool per turn — do not emit a second tool call or any further prose in the same reply",
     "after the first one, even to explain what you're about to do next. It is expected and correct to make",
     "additional tool calls on later turns if the task requires more than one step (e.g. look up a contact,",
     "then create a calendar event; search for a file, then read it, then send its contents).",
-    "If you are not calling a tool, respond with normal plain-text prose as usual.",
     policy,
     `Available tools: ${JSON.stringify(catalog)}`,
   ].join("\n");
