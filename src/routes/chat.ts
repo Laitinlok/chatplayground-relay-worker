@@ -115,7 +115,12 @@ chat.post("/v1/chat/completions", async (c) => {
   const toolsRequested = requestedTools.length > 0;
   if (toolsRequested) {
     body.tools = requestedTools;
-    body.messages = injectToolPrompt(body.messages, requestedTools, body.tool_choice);
+    body.messages = injectToolPrompt(
+      body.messages,
+      requestedTools,
+      body.tool_choice,
+      model.id,
+    );
   }
 
   const { endpoint, body: upstreamBody } = buildUpstreamRequest(body, model);

@@ -122,7 +122,15 @@ describe("tryParseRelayToolCall", () => {
     expect(messages[0]?.content).toContain("<think>...</think>");
   });
 
-  it("does not duplicate reasoning instructions", () => {
+  it("forces Luna to emit a tool call for default auto choice", () => {
+    const prompt = buildToolSystemPrompt(tools, undefined, "gpt-5.6-luna");
+    expect(prompt).toContain("Do not answer directly");
+  });
+
+  it("keeps Luna tool choice none disabled", () => {
+    const prompt = buildToolSystemPrompt(tools, "none", "gpt-5.6-luna");
+    expect(prompt).toContain("must not call any tool");
+  });  it("does not duplicate reasoning instructions", () => {
     const first = injectReasoningPrompt(
       [{ role: "user", content: "solve this" }],
       "medium",

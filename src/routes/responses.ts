@@ -184,9 +184,10 @@ responses.post("/v1/responses", async (c) => {
 	const toolsRequested = hasTools(tools);
 	if (toolsRequested)
 		request.messages = injectToolPrompt(
-			request.messages,
-			tools,
-			request.tool_choice,
+		  request.messages,
+		  tools,
+		  request.tool_choice,
+		  model.id,
 		);
 
 	const { endpoint, body } = buildUpstreamRequest(request, model);
