@@ -28,26 +28,38 @@ export function normalizeOpenAITools(tools: unknown): OpenAITool[] {
     if (nested && typeof nested === "object") {
       const fn = nested as Record<string, unknown>;
       if (typeof fn.name !== "string" || !fn.name.trim()) return [];
-      return [{
-        type: "function",
-        function: {
-          name: fn.name,
-          ...(typeof fn.description === "string" ? { description: fn.description } : {}),
-          ...(fn.parameters !== undefined ? { parameters: fn.parameters } : {}),
+      return [
+        {
+          type: "function",
+          function: {
+            name: fn.name,
+            ...(typeof fn.description === "string"
+              ? { description: fn.description }
+              : {}),
+            ...(fn.parameters !== undefined
+              ? { parameters: fn.parameters }
+              : {}),
+          },
         },
-      }];
+      ];
     }
 
     const flat = candidate as Partial<FlatFunctionTool>;
     if (typeof flat.name !== "string" || !flat.name.trim()) return [];
-    return [{
-      type: "function",
-      function: {
-        name: flat.name,
-        ...(typeof flat.description === "string" ? { description: flat.description } : {}),
-        ...(flat.parameters !== undefined ? { parameters: flat.parameters } : {}),
+    return [
+      {
+        type: "function",
+        function: {
+          name: flat.name,
+          ...(typeof flat.description === "string"
+            ? { description: flat.description }
+            : {}),
+          ...(flat.parameters !== undefined
+            ? { parameters: flat.parameters }
+            : {}),
+        },
       },
-    }];
+    ];
   });
 }
 
@@ -85,8 +97,20 @@ const ENVELOPE_KEY_ALIASES = [
   "call",
   "invoke",
 ];
-const NAME_KEY_ALIASES = ["name", "tool", "tool_name", "function", "function_name"];
-const ARGUMENT_KEY_ALIASES = ["arguments", "args", "parameters", "params", "input"];
+const NAME_KEY_ALIASES = [
+  "name",
+  "tool",
+  "tool_name",
+  "function",
+  "function_name",
+];
+const ARGUMENT_KEY_ALIASES = [
+  "arguments",
+  "args",
+  "parameters",
+  "params",
+  "input",
+];
 const TOOL_NAME_ALIASES: Record<string, string[]> = {
   cron: ["schedule", "scheduler", "reminder", "create_reminder", "cron_add"],
 };
@@ -96,23 +120,32 @@ const TOOL_CALL_EXAMPLES = [
 ];
 
 function formatToolCatalog(tools: OpenAITool[]): string {
-  return tools.map((tool) => {
-    const schema = tool.function.parameters;
-    if (!schema || typeof schema !== "object" || Array.isArray(schema)) {
-      return `- ${tool.function.name}: ${tool.function.description ?? ""}`;
-    }
-    const record = schema as Record<string, unknown>;
-    const required = Array.isArray(record.required) ? record.required : [];
-    const properties = record.properties && typeof record.properties === "object"
-      ? Object.entries(record.properties as Record<string, unknown>)
-      : [];
-    const params = properties.map(([name, value]) => {
-      const property = value && typeof value === "object" ? value as Record<string, unknown> : {};
-      const marker = required.includes(name) ? " (required)" : " (optional)";
-      return `  - ${name}${marker}: ${String(property.description ?? property.type ?? "value")}`;
-    });
-    return [`- ${tool.function.name}: ${tool.function.description ?? ""}`, ...params].join("\n");
-  }).join("\n");
+  return tools
+    .map((tool) => {
+      const schema = tool.function.parameters;
+      if (!schema || typeof schema !== "object" || Array.isArray(schema)) {
+        return `- ${tool.function.name}: ${tool.function.description ?? ""}`;
+      }
+      const record = schema as Record<string, unknown>;
+      const required = Array.isArray(record.required) ? record.required : [];
+      const properties =
+        record.properties && typeof record.properties === "object"
+          ? Object.entries(record.properties as Record<string, unknown>)
+          : [];
+      const params = properties.map(([name, value]) => {
+        const property =
+          value && typeof value === "object"
+            ? (value as Record<string, unknown>)
+            : {};
+        const marker = required.includes(name) ? " (required)" : " (optional)";
+        return `  - ${name}${marker}: ${String(property.description ?? property.type ?? "value")}`;
+      });
+      return [
+        `- ${tool.function.name}: ${tool.function.description ?? ""}`,
+        ...params,
+      ].join("\n");
+    })
+    .join("\n");
 }
 
 function normalizeName(value: string): string {
@@ -132,9 +165,10 @@ function editDistance(a: string, b: string): number {
     row[0] = i;
     for (let j = 1; j <= b.length; j++) {
       const previous = row[j]!;
-      row[j] = a[i - 1] === b[j - 1]
-        ? diagonal
-        : 1 + Math.min(diagonal, row[j]!, row[j - 1]!);
+      row[j] =
+        a[i - 1] === b[j - 1]
+          ? diagonal
+          : 1 + Math.min(diagonal, row[j]!, row[j - 1]!);
       diagonal = previous;
     }
   }
@@ -151,18 +185,25 @@ function toolNameDistance(a: string, b: string): number {
   return distance;
 }
 
-function resolveToolName(requested: string, tools?: OpenAITool[]): string | null {
+function resolveToolName(
+  requested: string,
+  tools?: OpenAITool[],
+): string | null {
   if (!tools?.length) return requested.trim();
   const normalized = normalizeName(requested);
   const candidates = tools.map((tool) => ({
     name: tool.function.name,
     normalized: normalizeName(tool.function.name),
   }));
-  const exact = candidates.find((candidate) => candidate.normalized === normalized);
+  const exact = candidates.find(
+    (candidate) => candidate.normalized === normalized,
+  );
   if (exact) return exact.name;
 
   const alias = candidates.find((candidate) =>
-    (TOOL_NAME_ALIASES[candidate.normalized] ?? []).some((value) => normalizeName(value) === normalized),
+    (TOOL_NAME_ALIASES[candidate.normalized] ?? []).some(
+      (value) => normalizeName(value) === normalized,
+    ),
   );
   if (alias) return alias.name;
 
@@ -176,7 +217,11 @@ function resolveToolName(requested: string, tools?: OpenAITool[]): string | null
   const best = scored[0];
   const second = scored[1];
   // Require both a strong match and separation from the runner-up.
-  if (best && best.score >= 0.70 && (!second || best.score - second.score >= 0.08)) {
+  if (
+    best &&
+    best.score >= 0.7 &&
+    (!second || best.score - second.score >= 0.08)
+  ) {
     return best.name;
   }
   return null;
@@ -191,7 +236,9 @@ function parseArgumentValue(value: unknown): Record<string, unknown> | null {
 }
 
 function findValue(obj: Record<string, unknown>, aliases: string[]): unknown {
-  const entry = Object.entries(obj).find(([key]) => aliases.includes(normalizeName(key)));
+  const entry = Object.entries(obj).find(([key]) =>
+    aliases.includes(normalizeName(key)),
+  );
   return entry?.[1];
 }
 
@@ -199,10 +246,10 @@ function buildIntent(obj: Record<string, unknown>): ParsedToolIntent | null {
   const name = findValue(obj, NAME_KEY_ALIASES);
   if (typeof name !== "string" || !name.trim()) return null;
   const rawArgs = findValue(obj, ARGUMENT_KEY_ALIASES);
-  const args = rawArgs === undefined ? extractArguments(obj) : parseArgumentValue(rawArgs);
+  const args =
+    rawArgs === undefined ? extractArguments(obj) : parseArgumentValue(rawArgs);
   return { name, arguments: args ?? {} };
 }
-
 
 function toolChoiceName(toolChoice?: ToolChoice): string | null {
   if (typeof toolChoice === "object" && toolChoice?.type === "function") {
@@ -223,8 +270,8 @@ export function buildToolSystemPrompt(
       : toolChoice === "required"
         ? "You must call exactly one tool from the available list."
         : forcedName
-        ? `You must call exactly one tool named "${forcedName}".`
-        : "If a tool is needed to answer accurately or to complete a multi-step task, call it — do not answer from memory when a tool exists that would give a more current or verified result (e.g. translation, unit conversion via calculator, or live data). Multi-step tasks may require several tool calls across turns, one call per turn, in sequence.";
+          ? `You must call exactly one tool named "${forcedName}".`
+          : "If a tool is needed to answer accurately or to complete a multi-step task, call it — do not answer from memory when a tool exists that would give a more current or verified result (e.g. translation, unit conversion via calculator, or live data). Multi-step tasks may require several tool calls across turns, one call per turn, in sequence.";
 
   const catalog = tools.map((t) => ({
     name: t.function.name,
@@ -290,20 +337,31 @@ export function injectToolPrompt(
 
   if (first?.role === "system" && typeof first.content === "string") {
     if (first.content.includes(TOOL_PROMPT_SENTINEL)) return messages;
-    return [{ ...first, content: `${first.content}\n\n${toolPrompt}` }, ...rest];
+    return [
+      { ...first, content: `${first.content}\n\n${toolPrompt}` },
+      ...rest,
+    ];
   }
 
   return [{ role: "system", content: toolPrompt }, ...messages];
 }
 
 const INVOKE_BLOCK_RE = /<invoke\s+name="([^"]+)"\s*>([\s\S]*?)<\/invoke>/i;
-const PARAM_RE = /<parameter\s+name="([^"]+)"(?:\s+string="(true|false)")?\s*>([\s\S]*?)<\/parameter>/gi;
+const PARAM_RE =
+  /<parameter\s+name="([^"]+)"(?:\s+string="(true|false)")?\s*>([\s\S]*?)<\/parameter>/gi;
 const CLAUDE_TOOL_CALL_TAG_RE = /<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/i;
-const TEXT_TOOL_CALL_RE = /\bTOOL_CALL\s*:\s*([^\r\n]+?)\s+(?:\r?\n\s*)?ARGUMENTS\s*:\s*/i;
+const TEXT_TOOL_CALL_RE =
+  /\bTOOL_CALL\s*:\s*([^\r\n]+?)\s+(?:\r?\n\s*)?ARGUMENTS\s*:\s*/i;
 const NATIVE_JSON_TOOL_CALL_RE = /"tool_calls"\s*:\s*\[/i;
-const PROSE_TOOL_CALL_RE = /\bI\s+(?:called|call|am calling|will call)\s+the\s+"([^"]+)"\s+tool\s+with\s+arguments\s*/i;
+const PROSE_TOOL_CALL_RE =
+  /\bI\s+(?:called|call|am calling|will call)\s+the\s+"([^"]+)"\s+tool\s+with\s+arguments\s*/i;
+const RECIPIENT_TOOL_CALL_RE =
+  /(?:<\|(?:recipient|channel)\|>|\bto\s*=\s*)(?:functions?|tools?)\.([A-Za-z0-9_.:-]+)[^\n]*?(?:<\|message\|>|<\|constrain\|>json\s*)?/i;
 
-function coerceParamValue(raw: string, stringFlag: string | undefined): unknown {
+function coerceParamValue(
+  raw: string,
+  stringFlag: string | undefined,
+): unknown {
   if (stringFlag === "true") return raw;
   const trimmed = raw.trim();
   try {
@@ -314,7 +372,9 @@ function coerceParamValue(raw: string, stringFlag: string | undefined): unknown 
 }
 
 /** Anthropic native `<invoke name="...">…</invoke>` dialect. */
-function parseInvokeDialect(text: string): { name: string; arguments: Record<string, unknown> } | null {
+function parseInvokeDialect(
+  text: string,
+): { name: string; arguments: Record<string, unknown> } | null {
   const match = INVOKE_BLOCK_RE.exec(text);
   if (!match) return null;
   const name = match[1] ?? "";
@@ -368,8 +428,13 @@ function parseNativeJsonToolCallDialect(text: string): ParsedToolIntent | null {
   const argumentsMatch = /"arguments"\s*:\s*("(?:\\.|[^"\\])*"|\{)/.exec(text);
   if (!argumentsMatch) return null;
   if (argumentsMatch[1] === "{") {
-    const args = extractBalancedJson(text, argumentsMatch.index + argumentsMatch[0].length - 1);
-    return args ? { name: nameMatch[1]!, arguments: parseJsonObject(args) ?? {} } : null;
+    const args = extractBalancedJson(
+      text,
+      argumentsMatch.index + argumentsMatch[0].length - 1,
+    );
+    return args
+      ? { name: nameMatch[1]!, arguments: parseJsonObject(args) ?? {} }
+      : null;
   }
   try {
     const decoded = JSON.parse(argumentsMatch[1]!);
@@ -391,7 +456,21 @@ function parseProseToolCallDialect(text: string): ParsedToolIntent | null {
   const parsed = parseJsonObject(json) ?? parseLooseJsonObject(json);
   if (!parsed) return null;
 
-    return buildIntent(parsed);
+  return buildIntent({ name: match[1], arguments: parsed });
+}
+
+/**
+ * GPT-5.x-compatible Harmony/recipient dialect, for example:
+ * `<|channel|>commentary to=functions.web_search <|constrain|>json<|message|>{...}`.
+ * The recipient is resolved against requested tools before it is exposed.
+ */
+function parseRecipientToolCallDialect(text: string): ParsedToolIntent | null {
+  const match = RECIPIENT_TOOL_CALL_RE.exec(text);
+  if (!match?.[1]) return null;
+  const json = extractBalancedJson(text, text.indexOf("{", match.index));
+  if (!json) return null;
+  const args = parseJsonObject(json) ?? parseLooseJsonObject(json);
+  return args ? buildIntent({ name: match[1], arguments: args }) : null;
 }
 
 function parseJsonObject(json: string): Record<string, unknown> | null {
@@ -422,7 +501,9 @@ function parseLooseJsonObject(json: string): Record<string, unknown> | null {
   return repaired === json ? null : parseJsonObject(repaired);
 }
 
-function extractArguments(obj: Record<string, unknown>): Record<string, unknown> {
+function extractArguments(
+  obj: Record<string, unknown>,
+): Record<string, unknown> {
   const nested = obj.arguments;
   if (nested && typeof nested === "object" && !Array.isArray(nested)) {
     return nested as Record<string, unknown>;
@@ -461,12 +542,12 @@ function extractBalancedJson(buf: string, startIdx: number): string | null {
         escaped = false;
       } else if (ch === "\\") {
         escaped = true;
-      } else if (ch === "\"") {
+      } else if (ch === '"') {
         inString = false;
       }
       continue;
     }
-    if (ch === "\"") {
+    if (ch === '"') {
       inString = true;
       continue;
     }
@@ -483,7 +564,11 @@ function findEnvelopeJson(text: string): string | null {
   const keyPattern = /"([^"\\]+)"\s*:/g;
   let match: RegExpExecArray | null;
   while ((match = keyPattern.exec(text)) !== null) {
-    if (!ENVELOPE_KEY_ALIASES.some((alias) => normalizeName(match![1]!) === normalizeName(alias))) {
+    if (
+      !ENVELOPE_KEY_ALIASES.some(
+        (alias) => normalizeName(match![1]!) === normalizeName(alias),
+      )
+    ) {
       continue;
     }
     const openIdx = text.lastIndexOf("{", match.index);
@@ -499,7 +584,10 @@ function findEnvelopeJson(text: string): string | null {
  * Returns null if the text isn't a well-formed envelope — callers should
  * then treat the text as ordinary prose.
  */
-export function tryParseRelayToolCall(text: string, tools?: OpenAITool[]): ShimToolCall | null {
+export function tryParseRelayToolCall(
+  text: string,
+  tools?: OpenAITool[],
+): ShimToolCall | null {
   const trimmed = text.trim();
   const toToolCall = (intent: ParsedToolIntent | null): ShimToolCall | null => {
     if (!intent) return null;
@@ -524,8 +612,11 @@ export function tryParseRelayToolCall(text: string, tools?: OpenAITool[]): ShimT
   if (nativeJson) return toToolCall(nativeJson);
   const prose = parseProseToolCallDialect(trimmed);
   if (prose) return toToolCall(prose);
+  const recipient = parseRecipientToolCallDialect(trimmed);
+  if (recipient) return toToolCall(recipient);
 
-  const envelopeJson = findEnvelopeJson(trimmed) ?? (trimmed.startsWith("{") ? trimmed : null);
+  const envelopeJson =
+    findEnvelopeJson(trimmed) ?? (trimmed.startsWith("{") ? trimmed : null);
   if (!envelopeJson) return null;
 
   let parsed: unknown;
@@ -534,7 +625,8 @@ export function tryParseRelayToolCall(text: string, tools?: OpenAITool[]): ShimT
   } catch {
     parsed = parseLooseJsonObject(envelopeJson);
   }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+    return null;
 
   const wrapper = parsed as Record<string, unknown>;
   const envelope = findValue(wrapper, ENVELOPE_KEY_ALIASES);

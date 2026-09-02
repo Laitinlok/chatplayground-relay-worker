@@ -37,7 +37,10 @@ describe("tryParseRelayToolCall", () => {
       { type: "function", function: { name: "calender" } },
     ];
     expect(
-      tryParseRelayToolCall('{"call":{"name":"calendr","arguments":{}}}', ambiguous),
+      tryParseRelayToolCall(
+        '{"call":{"name":"calendr","arguments":{}}}',
+        ambiguous,
+      ),
     ).toBeNull();
   });
 
@@ -50,9 +53,27 @@ describe("tryParseRelayToolCall", () => {
     expect(call?.function.arguments).toBe('{"action":"add","amount":6600}');
   });
 
+  it("parses GPT-5 Harmony recipient tool calls", () => {
+    const call = tryParseRelayToolCall(
+      '<|channel|>commentary to=functions.web_search <|constrain|>json<|message|>{"query":"latest news"}',
+      tools,
+    );
+    expect(call?.function.name).toBe("web_search");
+    expect(call?.function.arguments).toBe('{"query":"latest news"}');
+  });
+
+  it("does not expose an unknown Harmony recipient as a tool call", () => {
+    expect(
+      tryParseRelayToolCall(
+        '<|channel|>commentary to=functions.delete_all <|message|>{"confirm":true}',
+        tools,
+      ),
+    ).toBeNull();
+  });
+
   it("accepts inline TOOL_CALL labels", () => {
     const call = tryParseRelayToolCall(
-      "I will search. TOOL_CALL: web_search ARGUMENTS: {\"query\":\"food hacks\"}",
+      'I will search. TOOL_CALL: web_search ARGUMENTS: {"query":"food hacks"}',
       tools,
     );
     expect(call?.function.name).toBe("web_search");
@@ -61,7 +82,7 @@ describe("tryParseRelayToolCall", () => {
 
   it("parses the exact relay text emitted by non-5.x model families", () => {
     const call = tryParseRelayToolCall(
-      "I'll search the web to find the latest TikTok food hacks for you.\r\nTOOL_CALL: ddg_search_search\r\nARGUMENTS: {\"query\":\"latest TikTok food hacks 2025\",\"max_results\":10}",
+      'I\'ll search the web to find the latest TikTok food hacks for you.\r\nTOOL_CALL: ddg_search_search\r\nARGUMENTS: {"query":"latest TikTok food hacks 2025","max_results":10}',
       normalizeOpenAITools([
         {
           type: "function",
@@ -78,10 +99,15 @@ describe("tryParseRelayToolCall", () => {
   });
 
   it("normalizes flat Responses-style tools for chat requests", () => {
-    expect(normalizeOpenAITools([
-      { type: "function", name: "ddg_search_search", parameters: {} },
-    ])).toEqual([
-      { type: "function", function: { name: "ddg_search_search", parameters: {} } },
+    expect(
+      normalizeOpenAITools([
+        { type: "function", name: "ddg_search_search", parameters: {} },
+      ]),
+    ).toEqual([
+      {
+        type: "function",
+        function: { name: "ddg_search_search", parameters: {} },
+      },
     ]);
   });
 
@@ -126,7 +152,8 @@ describe("tryParseRelayToolCall", () => {
     expect(prompt).toContain("emit the call immediately");
   });
   it("parses the first call once when the model duplicates the payload", () => {
-    const payload = '{"relay_tool_call":{"name":"cron","arguments":{"action":"add"}}}';
+    const payload =
+      '{"relay_tool_call":{"name":"cron","arguments":{"action":"add"}}}';
     const call = tryParseRelayToolCall(`${payload}${payload}`, tools);
     expect(call?.function.name).toBe("cron");
     expect(call?.function.arguments).toBe('{"action":"add"}');
