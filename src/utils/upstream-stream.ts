@@ -285,8 +285,8 @@ export function streamUpstreamAsOpenAI(
         if (split.reasoningContent) {
           controller.enqueue(sse({ reasoning_content: split.reasoningContent }));
         }
-        const sources = formatCitations(citations);
-        const answer = split.content + sources;
+        const visibleContent = split.content || split.reasoningContent;
+        const answer = visibleContent + formatCitations(citations);
         if (answer) controller.enqueue(sse({ content: answer }));
 
         controller.enqueue(sse({}, "stop"));
@@ -373,7 +373,8 @@ export function streamUpstreamWithToolShim(
           if (split.reasoningContent) {
             controller.enqueue(sse({ reasoning_content: split.reasoningContent }));
           }
-          const answer = split.content + formatCitations(citations);
+          const visibleContent = split.content || split.reasoningContent;
+          const answer = visibleContent + formatCitations(citations);
           if (answer) controller.enqueue(sse({ content: answer }));
           controller.enqueue(sse({}, "stop"));
         }

@@ -209,12 +209,13 @@ responses.post("/v1/responses", async (c) => {
 		? tryParseRelayToolCall(rawContent, request.tools)
 		: null;
 	const split = splitReasoningContent(rawContent);
+	const visibleContent = split.content || split.reasoningContent;
 	const content = toolCall
 		? ""
 		: parsed.citations.length
-			? inlineCitationLinks(split.content, parsed.citations) +
+			? inlineCitationLinks(visibleContent, parsed.citations) +
 				formatCitations(parsed.citations)
-			: split.content;
+			: visibleContent;
 	const result = chatResultToResponses(
 		model.id,
 		content,

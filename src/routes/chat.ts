@@ -210,8 +210,8 @@ chat.post("/v1/chat/completions", async (c) => {
   const split = splitReasoningContent(rawContent);
   const content =
     citations.length === 0
-      ? split.content
-      : inlineCitationLinks(split.content, citations) +
+      ? split.content || split.reasoningContent
+      : inlineCitationLinks(split.content || split.reasoningContent, citations) +
         formatCitations(citations);
 
   const response: ChatCompletionResponse = {
