@@ -119,7 +119,6 @@ chat.post("/v1/chat/completions", async (c) => {
       body.messages,
       requestedTools,
       body.tool_choice,
-      model.id,
     );
   }
 

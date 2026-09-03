@@ -187,7 +187,6 @@ responses.post("/v1/responses", async (c) => {
 		  request.messages,
 		  tools,
 		  request.tool_choice,
-		  model.id,
 		);
 
 	const { endpoint, body } = buildUpstreamRequest(request, model);

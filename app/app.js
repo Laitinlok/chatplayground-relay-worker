@@ -130,8 +130,13 @@ async function mcpRequest(server, method, params = {}, sessionId) {
 
 async function discoverMcpTools() {
   const builtInTool = { server: embeddedDuckDuckGoServer, sessionId: "embedded-duckduckgo", tool: { name: "duckduckgo_search", description: "Search the web with DuckDuckGo.", inputSchema: { type: "object", properties: { query: { type: "string" }, max_results: { type: "integer" } }, required: ["query"] } } };
-  state.mcpTools = [builtInTool];
-  if (!state.mcpServers.length) { els.mcpStatus.textContent = "Embedded DuckDuckGo MCP ready."; return; }
+  state.mcpTools = window.__TAURI__?.core?.invoke ? [builtInTool] : [];
+  if (!state.mcpServers.length) {
+    els.mcpStatus.textContent = state.mcpTools.length
+      ? "Embedded DuckDuckGo MCP ready."
+      : "Add an MCP server in Settings to enable tools.";
+    return;
+  }
   try {
     for (const server of state.mcpServers) {
       const initialized = await mcpRequest(server, "initialize", { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "relay-studio", version: "0.1.0" } });
@@ -406,7 +411,7 @@ async function askModel(model, messages, tools) {
 }
 function requestedTools() {
   const tools = [];
-  if ($("#mcpToggle").getAttribute("aria-pressed") === "true") {
+  if (state.mcpTools.length && $("#mcpToggle").getAttribute("aria-pressed") === "true") {
     tools.push({ type: "function", function: { name: "mcp_tool", description: "Request an approved tool from a configured MCP server. The host application must execute this tool.", parameters: { type: "object", properties: { server: { type: "string" }, tool: { type: "string" }, arguments: { type: "object" } }, required: ["server", "tool", "arguments"] } } });
     for (const entry of state.mcpTools) tools.push({ type: "function", function: { name: entry.tool.name, description: `[${entry.server.name}] ${entry.tool.description || "MCP tool"}`, parameters: entry.tool.inputSchema || { type: "object", properties: {} } } });
   }

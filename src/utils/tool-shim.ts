@@ -261,23 +261,14 @@ function toolChoiceName(toolChoice?: ToolChoice): string | null {
 export function buildToolSystemPrompt(
   tools: OpenAITool[],
   toolChoice?: ToolChoice,
-  modelId?: string,
 ): string {
   const forcedName = toolChoiceName(toolChoice);
-
-  const forceLunaToolCall =
-    modelId === "gpt-5.6-luna" &&
-    toolChoice !== "none" &&
-    toolChoice !== "required" &&
-    !forcedName;
 
   const policy =
     toolChoice === "none"
       ? "You must not call any tool. Answer normally in plain text."
       : toolChoice === "required"
         ? "You must call exactly one tool from the available list."
-        : forceLunaToolCall
-          ? "You must call exactly one tool from the available list. Do not answer directly, even if you believe you know the answer."
           : forcedName
           ? `You must call exactly one tool named "${forcedName}".`
           : "If a tool is needed to answer accurately or to complete a multi-step task, call it — do not answer from memory when a tool exists that would give a more current or verified result (e.g. translation, unit conversion via calculator, or live data). Multi-step tasks may require several tool calls across turns, one call per turn, in sequence.";
@@ -288,16 +279,10 @@ export function buildToolSystemPrompt(
     parameters: t.function.parameters ?? { type: "object", properties: {} },
   }));
 
-  const decisionRules = forceLunaToolCall
-    ? [
-        "This request is in tool-call mode.",
-        "Before producing any answer, select the single best matching tool and emit its call immediately.",
-        "A direct prose answer is invalid in this mode.",
-      ]
-    : [
-        "If a tool is needed, emit the call immediately; do not preface it with statements such as 'I will search'.",
-        "If you are not calling a tool, respond with normal plain-text prose as usual.",
-      ];
+  const decisionRules = [
+    "If a tool is needed, emit the call immediately; do not preface it with statements such as 'I will search'.",
+    "If you are not calling a tool, respond with normal plain-text prose as usual.",
+  ];
 
   return [
     "You have access to the tools listed below through the relay. The host will execute a tool call and return the result to you.",
@@ -356,7 +341,7 @@ export function injectToolPrompt(
   toolChoice?: ToolChoice,
   modelId?: string,
 ): OpenAIMessage[] {
-  const toolPrompt = buildToolSystemPrompt(tools, toolChoice, modelId);
+  const toolPrompt = buildToolSystemPrompt(tools, toolChoice);
   const [first, ...rest] = messages;
 
   if (first?.role === "system" && typeof first.content === "string") {
