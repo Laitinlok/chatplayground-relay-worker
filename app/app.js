@@ -357,24 +357,52 @@ async function duckDuckGoMcpSearch(query) {
   }
   return { sources, context };
 }
-async function askModel(model, messages, tools) {
-  const response = await fetch(apiUrl("/v1/chat/completions"), {
-    method: "POST",
-    headers: headers(),
-    body: JSON.stringify({ model, messages, tools: tools.length ? tools : undefined }),
-  });
-  const raw = await response.text();
-  let payload = {};
-  try { payload = JSON.parse(raw); } catch { /* preserve the status below */ }
-  if (!response.ok) throw new Error(payload.error?.message || raw.trim().slice(0, 500) || `Request failed (${response.status})`);
-  const choice = payload.choices?.[0];
-  if (choice?.message?.tool_calls?.length) {
-    const call = choice.message.tool_calls[0];
-    throw new Error(`Model requested unexecuted tool: ${call.function?.name || "unknown"}`);
+async function executeRequestedTool(name, args) {
+  if (name === "mcp_tool") {
+    const serverName = String(args?.server || "");
+    const toolName = String(args?.tool || "");
+    const entry = state.mcpTools.find((item) => item.server.name === serverName && item.tool.name === toolName);
+    if (!entry) throw new Error(`MCP tool not found: ${serverName}/${toolName}`);
+    return (await mcpRequest(entry.server, "tools/call", { name: toolName, arguments: args.arguments || {} }, entry.sessionId)).result;
   }
-  const content = choice?.message?.content;
-  if (typeof content !== "string" || !content.trim()) throw new Error(`Empty model response${choice?.finish_reason ? ` (${choice.finish_reason})` : ""}.`);
-  return content;
+  return executeMcpTool(name, args);
+}
+
+async function askModel(model, messages, tools) {
+  const conversation = messages.map((message) => ({ ...message }));
+  const maxToolRounds = 4;
+
+  for (let round = 0; round <= maxToolRounds; round++) {
+    const response = await fetch(apiUrl("/v1/chat/completions"), {
+      method: "POST",
+      headers: headers(),
+      body: JSON.stringify({ model, messages: conversation, tools: tools.length ? tools : undefined }),
+    });
+    const raw = await response.text();
+    let payload = {};
+    try { payload = JSON.parse(raw); } catch { /* preserve the status below */ }
+    if (!response.ok) throw new Error(payload.error?.message || raw.trim().slice(0, 500) || `Request failed (${response.status})`);
+    const choice = payload.choices?.[0];
+    const toolCalls = choice?.message?.tool_calls;
+
+    if (Array.isArray(toolCalls) && toolCalls.length) {
+      if (round === maxToolRounds) throw new Error("Model exceeded the tool-call limit.");
+      conversation.push({ role: "assistant", content: choice.message.content || null, tool_calls: toolCalls });
+      for (const call of toolCalls) {
+        let args = {};
+        try { args = JSON.parse(call.function?.arguments || "{}"); } catch { throw new Error(`Invalid arguments for tool ${call.function?.name || "unknown"}.`); }
+        const result = await executeRequestedTool(call.function?.name || "", args);
+        conversation.push({ role: "tool", tool_call_id: call.id, name: call.function?.name, content: JSON.stringify(result) });
+      }
+      continue;
+    }
+
+    const content = choice?.message?.content;
+    if (typeof content !== "string" || !content.trim()) throw new Error(`Empty model response${choice?.finish_reason ? ` (${choice.finish_reason})` : ""}.`);
+    return content;
+  }
+
+  throw new Error("Model did not return a response.");
 }
 function requestedTools() {
   const tools = [];
