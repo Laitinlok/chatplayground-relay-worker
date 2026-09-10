@@ -33,7 +33,7 @@ function event(type: string, data: unknown): string {
   return `event: ${type}\ndata: ${JSON.stringify(data)}\n\n`;
 }
 
-function streamResponse(
+export function streamResponse(
   result: ResponsesResponse,
   toolCall: ReturnType<typeof tryParseRelayToolCall>,
 ): ReadableStream<Uint8Array> {
@@ -41,9 +41,21 @@ function streamResponse(
   return new ReadableStream({
     start(controller) {
       const response = { ...result, status: "in_progress" };
-      controller.enqueue(encoder.encode(event("response.created", response)));
       controller.enqueue(
-        encoder.encode(event("response.in_progress", response)),
+        encoder.encode(
+          event("response.created", {
+            type: "response.created",
+            response,
+          }),
+        ),
+      );
+      controller.enqueue(
+        encoder.encode(
+          event("response.in_progress", {
+            type: "response.in_progress",
+            response,
+          }),
+        ),
       );
       const output = result.output[0];
       if (toolCall && output?.type === "function_call") {
@@ -152,7 +164,14 @@ function streamResponse(
           ),
         );
       }
-      controller.enqueue(encoder.encode(event("response.completed", result)));
+      controller.enqueue(
+        encoder.encode(
+          event("response.completed", {
+            type: "response.completed",
+            response: result,
+          }),
+        ),
+      );
       controller.close();
     },
   });

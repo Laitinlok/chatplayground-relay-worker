@@ -8,7 +8,9 @@ import {
   chatResultToResponses,
   responsesToChatRequest,
   responsesToolsToChatTools,
+  type ResponsesResponse,
 } from "../src/types/responses";
+import { streamResponse } from "../src/routes/responses";
 
 describe("Responses adapter", () => {
   it("maps GPT-5.6-style input and function tools to chat shapes", () => {
@@ -111,6 +113,23 @@ describe("Responses adapter", () => {
     expect(call.output_text).toBe("");
   });
 
+  it("emits Responses-compatible envelopes for streaming clients", async () => {
+    const result = chatResultToResponses(
+      "gpt-5.6",
+      "hello",
+      null,
+      [{ role: "user", content: "hi" }],
+      "resp_stream",
+    ) as ResponsesResponse;
+    const body = await new Response(streamResponse(result, null)).text();
+
+    expect(body).toContain(
+      'event: response.created\ndata: {"type":"response.created","response":',
+    );
+    expect(body).toContain(
+      'event: response.completed\ndata: {"type":"response.completed","response":',
+    );
+  });
   it("does not duplicate the injected tool prompt", () => {
     const tool: OpenAITool[] = [
       { type: "function", function: { name: "cron" } },
