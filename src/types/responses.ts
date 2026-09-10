@@ -4,7 +4,7 @@ import type { OpenAITool, ToolChoice } from "../utils/tool-shim";
 
 export interface ResponsesRequest {
   model: string;
-  input: string | ResponsesInputItem[];
+  input: string | ResponsesInputItem | ResponsesInputItem[];
   instructions?: string;
   previous_response_id?: string;
   stream?: boolean;
@@ -157,7 +157,9 @@ export function responsesToChatRequest(
   const items: ResponsesInputItem[] =
     typeof req.input === "string"
       ? [{ role: "user", content: req.input }]
-      : req.input;
+      : Array.isArray(req.input)
+        ? req.input
+        : [req.input];
   const messages: OpenAIMessage[] = [];
   if (req.instructions)
     messages.push({ role: "system", content: req.instructions });

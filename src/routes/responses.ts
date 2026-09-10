@@ -164,8 +164,15 @@ responses.post("/v1/responses", async (c) => {
     throw invalidRequest("Request body must be JSON.");
   if (!raw.model || typeof raw.model !== "string")
     throw invalidRequest("'model' is required.", "model");
-  if (typeof raw.input !== "string" && !Array.isArray(raw.input))
-    throw invalidRequest("'input' must be a string or array.", "input");
+  if (
+    typeof raw.input !== "string" &&
+    !Array.isArray(raw.input) &&
+    (!raw.input || typeof raw.input !== "object")
+  )
+    throw invalidRequest(
+      "'input' must be a string, object, or array.",
+      "input",
+    );
 
   const registry = await getModels(c.env);
   const model = findModel(raw.model, registry);

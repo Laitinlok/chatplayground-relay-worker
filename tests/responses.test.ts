@@ -34,6 +34,14 @@ describe("Responses adapter", () => {
     expect(request.tool_choice).toBe("required");
   });
 
+  it("accepts a single OmniRoute input item object", () => {
+    const request = responsesToChatRequest({
+      model: "gpt-5.6",
+      input: { role: "user", content: "Find it" },
+    });
+
+    expect(request.messages).toEqual([{ role: "user", content: "Find it" }]);
+  });
   it("preserves function call and function call output history", () => {
     const request = responsesToChatRequest({
       model: "gpt-5.6",
