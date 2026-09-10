@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { auth } from "./middleware/auth";
 import { errorHandler } from "./middleware/error-handler";
+import admin from "./routes/admin-keys";
 import chat from "./routes/chat";
 import files from "./routes/files";
 import models from "./routes/models";
@@ -46,5 +47,6 @@ app.route("/", models);
 app.route("/", chat);
 app.route("/", responses);
 app.route("/", files);
+app.route("/admin", admin);
 
 export default app;

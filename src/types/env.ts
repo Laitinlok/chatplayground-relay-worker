@@ -23,12 +23,16 @@ export interface Env {
   // cookie — use an account dedicated to this relay.
   CLERK_EMAIL?: string;
   CLERK_PASSWORD?: string;
+  // Admin portal access restriction. Configure this alongside Cloudflare Access.
+  ADMIN_ALLOWED_EMAIL?: string;
 
   // KV binding (optional — without it every cold isolate refetches the model
   // feed, and a discovery failure surfaces as a 503)
   MODEL_CACHE?: KVNamespace;
   // Chat-session cache (optional — enables upstream chat continuity).
   CHAT_CACHE?: KVNamespace;
+  // D1 database for hashed relay API keys.
+  DB?: D1Database;
 }
 
 // Hono context variables populated by middleware.
@@ -39,4 +43,6 @@ export interface Variables {
    * that actually talk to upstream should trigger (or be broken by) that.
    */
   sessionToken: () => Promise<string>;
+  /** Email authorized for the admin portal, when configured. */
+  adminEmail?: string;
 }
