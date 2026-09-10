@@ -201,11 +201,15 @@ responses.post("/v1/responses", async (c) => {
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(CHAT_TIMEOUT),
   });
-  if (!upstream.ok || !upstream.body)
+  if (!upstream.ok || !upstream.body) {
+    const detail = (await upstream.text().catch(() => "")).trim();
     throw upstreamError(
       upstream.status,
-      `Upstream returned ${upstream.status}.`,
+      detail
+        ? `Upstream returned ${upstream.status}: ${detail.slice(0, 300)}`
+        : `Upstream returned ${upstream.status} with no message.`,
     );
+  }
 
   const parsed = await collectUpstream(upstream.body);
   const rawContent = parsed.content;
