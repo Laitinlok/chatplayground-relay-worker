@@ -7,11 +7,7 @@ import type {
   ChatCompletionUsage,
   OpenAIMessage,
 } from "../types/openai";
-import {
-  invalidRequest,
-  modelNotFound,
-  upstreamError,
-} from "../utils/errors";
+import { invalidRequest, modelNotFound, upstreamError } from "../utils/errors";
 import { getModels } from "../utils/model-discovery";
 import { findModel } from "../utils/model-id";
 import {
@@ -58,15 +54,21 @@ async function loadCachedChatId(env: Env, key: string): Promise<string | null> {
   return env.CHAT_CACHE.get(key);
 }
 
-async function saveCachedChatId(env: Env, key: string, chatId: string): Promise<void> {
+async function saveCachedChatId(
+  env: Env,
+  key: string,
+  chatId: string,
+): Promise<void> {
   if (!env.CHAT_CACHE) return;
-  await env.CHAT_CACHE.put(key, chatId, { expirationTtl: CHAT_CACHE_TTL_SECONDS });
+  await env.CHAT_CACHE.put(key, chatId, {
+    expirationTtl: CHAT_CACHE_TTL_SECONDS,
+  });
 }
 
 chat.post("/v1/chat/completions", async (c) => {
-  const body = (await c.req.json().catch(() => null)) as
-    | ChatCompletionRequest
-    | null;
+  const body = (await c.req
+    .json()
+    .catch(() => null)) as ChatCompletionRequest | null;
 
   if (!body || typeof body !== "object") {
     throw invalidRequest("Request body must be JSON.");
@@ -88,11 +90,7 @@ chat.post("/v1/chat/completions", async (c) => {
   // and there's a cached chatId for this conversation. This avoids spending
   // a brand-new chatplayground chat (and quota) on every single request.
   const conversationId = c.req.header("x-conversation-id") ?? undefined;
-  const cacheKey = await chatCacheKey(
-    sessionToken,
-    model.id,
-    conversationId,
-  );
+  const cacheKey = await chatCacheKey(sessionToken, model.id, conversationId);
 
   if (!body.user) {
     const cachedChatId = await loadCachedChatId(c.env, cacheKey);
@@ -107,6 +105,9 @@ chat.post("/v1/chat/completions", async (c) => {
   // reasoning_effort still receive an explicit thinking instruction.
   const reasoningEffort = body.reasoning_effort ?? "medium";
   body.reasoning_effort = reasoningEffort;
+  // Snapshot original messages before injection so estimateUsage only counts
+  // the caller's actual content, not injected reasoning/tool prompts.
+  const originalMessages = body.messages;
   body.messages = injectReasoningPrompt(body.messages, reasoningEffort);
 
   // Prompt-injection tool-calling shim: inject exactly one authoritative
@@ -174,9 +175,11 @@ chat.post("/v1/chat/completions", async (c) => {
     });
   }
 
-  const { content: rawContent, citations, chatId } = await collectUpstream(
-    upstream.body,
-  );
+  const {
+    content: rawContent,
+    citations,
+    chatId,
+  } = await collectUpstream(upstream.body);
 
   if (chatId) {
     await saveCachedChatId(c.env, cacheKey, chatId);
@@ -199,7 +202,7 @@ chat.post("/v1/chat/completions", async (c) => {
           finish_reason: "tool_calls",
         },
       ],
-      usage: estimateUsage(body.messages, rawContent),
+      usage: estimateUsage(originalMessages, rawContent),
     };
     return Response.json(toolResponse);
   }
@@ -210,8 +213,10 @@ chat.post("/v1/chat/completions", async (c) => {
   const content =
     citations.length === 0
       ? split.content || split.reasoningContent
-      : inlineCitationLinks(split.content || split.reasoningContent, citations) +
-        formatCitations(citations);
+      : inlineCitationLinks(
+          split.content || split.reasoningContent,
+          citations,
+        ) + formatCitations(citations);
 
   const response: ChatCompletionResponse = {
     id,
@@ -231,7 +236,7 @@ chat.post("/v1/chat/completions", async (c) => {
         finish_reason: "stop",
       },
     ],
-    usage: estimateUsage(body.messages, rawContent),
+    usage: estimateUsage(originalMessages, rawContent),
   };
 
   return Response.json(response);

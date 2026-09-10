@@ -57,8 +57,9 @@ describe("buildUpstreamRequest — field mapping", () => {
     expect(body.messages).toHaveLength(2);
     expect(body.messages[0]?.content).toHaveLength(15_000);
     expect(body.messages[1]?.content).toBe("a");
-    expect(body.messages.map((message) => message.content).join(""))
-      .toBe(content);
+    expect(body.messages.map((message) => message.content).join("")).toBe(
+      content,
+    );
   });
 
   it("serializes tool-call history using the injected text protocol", () => {
@@ -69,18 +70,22 @@ describe("buildUpstreamRequest — field mapping", () => {
           {
             role: "assistant",
             content: null,
-            tool_calls: [{
-              id: "call_1",
-              type: "function",
-              function: { name: "cron", arguments: '{"action":"add"}' },
-            }],
+            tool_calls: [
+              {
+                id: "call_1",
+                type: "function",
+                function: { name: "cron", arguments: '{"action":"add"}' },
+              },
+            ],
           },
           { role: "tool", content: "created" },
         ],
       },
       AZURE_MODEL,
     );
-    expect(body.messages[0]?.content).toBe('TOOL_CALL: cron\nARGUMENTS: {"action":"add"}');
+    expect(body.messages[0]?.content).toBe(
+      'TOOL_CALL: cron\nARGUMENTS: {"action":"add"}',
+    );
     expect(body.messages[1]?.content).toContain("[Tool Result]\ncreated");
   });
   it("forwards GPT reasoning controls to the upstream body", () => {

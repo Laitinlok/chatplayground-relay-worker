@@ -38,7 +38,7 @@ function clerkStub(url: string): Response {
     : Response.json({ object: "token", jwt: "minted.jwt.sig" });
 }
 
-// biome-ignore lint/suspicious/noExplicitAny: minimal test env stub
+// oxlint-disable-next-line typescript/no-explicit-any -- minimal test env stub
 function call(env: any, headers: Record<string, string>) {
   const app = new Hono<any>();
   app.onError(errorHandler);
@@ -257,7 +257,7 @@ describe("auth — gateway mode cookie rotation", () => {
     expect(cookieOf(3)).toBe("__client=secret-cookie");
   });
 
-  it("401s when both the KV copy and the secret are dead", async () => {
+  it("keeps the KV copy when the secret is dead too — deleting gains nothing", async () => {
     const MODEL_CACHE = kv("dead-value");
     mintOnly(() => new Response("", { status: 401 }));
 
@@ -268,13 +268,92 @@ describe("auth — gateway mode cookie rotation", () => {
       },
     );
     expect(res.status).toBe(401);
-    expect(MODEL_CACHE.delete).toHaveBeenCalledWith("clerk:client_cookie");
+    expect(MODEL_CACHE.delete).not.toHaveBeenCalled();
   });
 
   it("works without a KV binding (rotation just isn't persisted)", async () => {
     mintOnly(() => tokenResponse("__client=rotated-value; Path=/"));
     const res = await call(base, { authorization: "Bearer sk-relay-xyz" });
     expect(res.status).toBe(200);
+  });
+});
+
+// workerd's Headers exposes getAll("set-cookie") and no getSetCookie; undici
+// (what these tests run on) is the other way round. So the accessor that
+// actually ships is never reached by a real Response here — these stub the
+// shape to cover the feature detection rather than workerd itself.
+describe("auth — cookie rotation under a workerd-shaped Headers", () => {
+  const base = {
+    RELAY_API_KEY: "sk-relay-xyz",
+    CLERK_CLIENT_COOKIE: "secret-cookie",
+    CLERK_FAPI_URL: "https://clerk.example.test",
+    UPSTREAM_ORIGIN: "https://web.example.test",
+    UPSTREAM_REFERER: "https://web.example.test/",
+  };
+
+  const kv = () => ({
+    get: vi.fn().mockResolvedValue(null),
+    put: vi.fn().mockResolvedValue(undefined),
+    delete: vi.fn().mockResolvedValue(undefined),
+  });
+
+  /** Response-shaped stub whose headers expose only the given accessors. */
+  function serve(headers: (setCookie: string) => Record<string, unknown>) {
+    const reply = (body: unknown, setCookie: string) =>
+      ({
+        ok: true,
+        status: 200,
+        headers: headers(setCookie),
+        json: async () => body,
+      }) as unknown as Response;
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL) =>
+        String(input).endsWith("/v1/client")
+          ? reply(
+              { response: { last_active_session_id: "sess_x" } },
+              "__client=rotated-value; Path=/; HttpOnly",
+            )
+          : reply({ jwt: "minted.jwt.sig" }, ""),
+    );
+  }
+
+  beforeEach(() => resetSessionTokenCache());
+  afterEach(() => vi.restoreAllMocks());
+
+  it("reads the rotation from getAll when getSetCookie is absent", async () => {
+    const MODEL_CACHE = kv();
+    serve((sc) => ({
+      getAll: (name: string) => (name === "set-cookie" && sc ? [sc] : []),
+      get: () => null,
+    }));
+
+    const res = await call(
+      { ...base, MODEL_CACHE },
+      { authorization: "Bearer sk-relay-xyz" },
+    );
+    expect(res.status).toBe(200);
+    expect(MODEL_CACHE.put).toHaveBeenCalledWith(
+      "clerk:client_cookie",
+      "rotated-value",
+    );
+  });
+
+  it("falls back to get() when neither list accessor exists", async () => {
+    const MODEL_CACHE = kv();
+    serve((sc) => ({
+      get: (name: string) => (name === "set-cookie" && sc ? sc : null),
+    }));
+
+    const res = await call(
+      { ...base, MODEL_CACHE },
+      { authorization: "Bearer sk-relay-xyz" },
+    );
+    expect(res.status).toBe(200);
+    expect(MODEL_CACHE.put).toHaveBeenCalledWith(
+      "clerk:client_cookie",
+      "rotated-value",
+    );
   });
 });
 
@@ -371,10 +450,77 @@ describe("auth — gateway mode failure handling", () => {
     );
   });
 
+  it("persists a lookup rotation even when the mint then fails", async () => {
+    const MODEL_CACHE = kv();
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) =>
+      String(input).endsWith("/v1/client")
+        ? Response.json(
+            { response: { last_active_session_id: "sess_x" } },
+            { headers: { "set-cookie": "__client=rotated-on-lookup; Path=/" } },
+          )
+        : new Response("", { status: 500 }),
+    );
+
+    const res = await call(
+      { ...base, MODEL_CACHE },
+      { authorization: "Bearer sk-relay-xyz" },
+    );
+    expect(res.status).toBe(502);
+    // Clerk already killed the old cookie when it issued this one; dropping it
+    // on the failure path would leave gateway mode with no live credential.
+    expect(MODEL_CACHE.put).toHaveBeenCalledWith(
+      "clerk:client_cookie",
+      "rotated-on-lookup",
+    );
+  });
+
+  it("re-resolves a session id Clerk 404s on, not just one it 401s on", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) =>
+      String(input).endsWith("/v1/client")
+        ? Response.json({ response: { last_active_session_id: "sess_first" } })
+        : Response.json({ jwt: "minted.jwt.sig" }),
+    );
+    await call(base, { authorization: "Bearer sk-relay-xyz" }); // caches sess_first
+    vi.setSystemTime(Date.now() + 46_000);
+
+    // Clerk answers 404 for a session id it no longer knows — not an auth
+    // failure, so treating only 401/403 as re-resolvable stranded the isolate.
+    vi.mocked(fetch).mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/v1/client")) {
+        return Response.json({
+          response: { last_active_session_id: "sess_second" },
+        });
+      }
+      return url.includes("sess_first")
+        ? new Response("", { status: 404 })
+        : Response.json({ jwt: "second.jwt.sig" });
+    });
+
+    const res = await call(base, { authorization: "Bearer sk-relay-xyz" });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ sessionToken: "second.jwt.sig" });
+  });
+
+  it("treats a 2xx mint with no jwt as a gateway failure", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) =>
+      String(input).endsWith("/v1/client")
+        ? Response.json({ response: { last_active_session_id: "sess_x" } })
+        : Response.json({ object: "token" }),
+    );
+
+    const res = await call(base, { authorization: "Bearer sk-relay-xyz" });
+    expect(res.status).toBe(502);
+    expect(((await res.json()) as { error: { code: string } }).error.code).toBe(
+      "upstream_502",
+    );
+  });
+
   it("never touches Clerk for a route that doesn't need upstream auth", async () => {
     vi.spyOn(globalThis, "fetch");
     // /v1/models and /v1/files never call the thunk.
-    // biome-ignore lint/suspicious/noExplicitAny: minimal test env stub
+    // oxlint-disable-next-line typescript/no-explicit-any -- minimal test env stub
     const app = new Hono<any>();
     app.onError(errorHandler);
     app.use("*", auth);
@@ -385,6 +531,212 @@ describe("auth — gateway mode failure handling", () => {
       base,
     );
     expect(res.status).toBe(200);
+    expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+  });
+});
+
+// The rotations that actually kill gateway mode are handed to a browser, not
+// to us, so the worker signs in for itself rather than watching Set-Cookie.
+describe("auth — gateway mode self-heals by signing in", () => {
+  const base = {
+    RELAY_API_KEY: "sk-relay-xyz",
+    CLERK_FAPI_URL: "https://clerk.example.test",
+    UPSTREAM_ORIGIN: "https://web.example.test",
+    UPSTREAM_REFERER: "https://web.example.test/",
+    CLERK_EMAIL: "relay@example.test",
+    CLERK_PASSWORD: "hunter2",
+  };
+
+  const kv = (stored: string | null = null) => ({
+    get: vi.fn().mockResolvedValue(stored),
+    put: vi.fn().mockResolvedValue(undefined),
+    delete: vi.fn().mockResolvedValue(undefined),
+  });
+
+  const json = (body: unknown, setCookie?: string) =>
+    new Response(JSON.stringify(body), {
+      headers: setCookie
+        ? { "content-type": "application/json", "set-cookie": setCookie }
+        : { "content-type": "application/json" },
+    });
+
+  /** Clerk where every configured cookie is dead and only sign-in works. */
+  function clerkThatOnlyAcceptsSignIn(tokenStatus = 200) {
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const cookie = (init?.headers as Record<string, string> | undefined)
+          ?.cookie;
+
+        if (url.endsWith("/v1/client")) {
+          // No cookie header at all is the sign-in bootstrap.
+          if (!cookie) {
+            return json(
+              { response: { sessions: [] } },
+              "__client=boot; Path=/",
+            );
+          }
+          return cookie === "__client=fresh-cookie"
+            ? json({ response: { last_active_session_id: "sess_new" } })
+            : json({ response: { sessions: [] } });
+        }
+        if (url.endsWith("/sign_ins"))
+          return json({ response: { id: "sia_1" } });
+        if (url.includes("attempt_first_factor")) {
+          return json(
+            { response: { status: "complete" } },
+            "__client=fresh-cookie; Path=/; HttpOnly",
+          );
+        }
+        return tokenStatus === 200
+          ? json({ jwt: "minted.jwt.sig" })
+          : new Response("", { status: tokenStatus });
+      },
+    );
+  }
+
+  beforeEach(() => resetSessionTokenCache());
+  afterEach(() => vi.restoreAllMocks());
+
+  it("signs in when no cookie is configured at all", async () => {
+    const MODEL_CACHE = kv();
+    clerkThatOnlyAcceptsSignIn();
+
+    const res = await call(
+      { ...base, MODEL_CACHE },
+      { authorization: "Bearer sk-relay-xyz" },
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ sessionToken: "minted.jwt.sig" });
+    // The cookie it signed in for is the one worth keeping.
+    expect(MODEL_CACHE.put).toHaveBeenCalledWith(
+      "clerk:client_cookie",
+      "fresh-cookie",
+    );
+  });
+
+  it("signs in after both the KV copy and the secret are dead", async () => {
+    const MODEL_CACHE = kv("dead-kv-value");
+    clerkThatOnlyAcceptsSignIn();
+
+    const res = await call(
+      { ...base, CLERK_CLIENT_COOKIE: "dead-secret", MODEL_CACHE },
+      { authorization: "Bearer sk-relay-xyz" },
+    );
+    expect(res.status).toBe(200);
+    expect(MODEL_CACHE.put).toHaveBeenCalledWith(
+      "clerk:client_cookie",
+      "fresh-cookie",
+    );
+  });
+
+  it("sends identifier then password, as two separate calls", async () => {
+    clerkThatOnlyAcceptsSignIn();
+    await call(base, { authorization: "Bearer sk-relay-xyz" });
+
+    const calls = vi
+      .mocked(fetch)
+      .mock.calls.map(([u, i]) => [
+        String(u),
+        (i as RequestInit | undefined)?.body,
+      ]);
+    const start = calls.find(([u]) => String(u).endsWith("/sign_ins"));
+    const attempt = calls.find(([u]) => String(u).includes("attempt_first"));
+    expect(start?.[1]).toBe("locale=en-US&identifier=relay%40example.test");
+    expect(attempt?.[1]).toBe("strategy=password&password=hunter2");
+    // The bootstrap must not carry a cookie, or Clerk reuses a cleared one.
+    const boot = vi.mocked(fetch).mock.calls[0]?.[1] as RequestInit;
+    expect((boot.headers as Record<string, string>).cookie).toBeUndefined();
+  });
+
+  it("does not burn a login when Clerk is merely down", async () => {
+    const MODEL_CACHE = kv("some-value");
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response("", { status: 500 }),
+    );
+
+    const res = await call(
+      { ...base, CLERK_CLIENT_COOKIE: "secret", MODEL_CACHE },
+      { authorization: "Bearer sk-relay-xyz" },
+    );
+    expect(res.status).toBe(502);
+    const urls = vi.mocked(fetch).mock.calls.map(([u]) => String(u));
+    expect(urls.some((u) => u.includes("sign_ins"))).toBe(false);
+    expect(MODEL_CACHE.delete).not.toHaveBeenCalled();
+  });
+
+  it("leaves the old behaviour alone when no credentials are configured", async () => {
+    clerkThatOnlyAcceptsSignIn();
+    const res = await call(
+      {
+        RELAY_API_KEY: "sk-relay-xyz",
+        CLERK_CLIENT_COOKIE: "dead-secret",
+        CLERK_FAPI_URL: "https://clerk.example.test",
+        UPSTREAM_ORIGIN: "https://web.example.test",
+        UPSTREAM_REFERER: "https://web.example.test/",
+      },
+      { authorization: "Bearer sk-relay-xyz" },
+    );
+    expect(res.status).toBe(401);
+    const urls = vi.mocked(fetch).mock.calls.map(([u]) => String(u));
+    expect(urls.some((u) => u.includes("sign_ins"))).toBe(false);
+  });
+
+  it("surfaces the original auth failure when the password is wrong", async () => {
+    const MODEL_CACHE = kv();
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/v1/client")) {
+          return json({ response: { sessions: [] } }, "__client=boot; Path=/");
+        }
+        if (url.endsWith("/sign_ins"))
+          return json({ response: { id: "sia_1" } });
+        // Clerk rejects the password.
+        return new Response("", { status: 422 });
+      },
+    );
+
+    const res = await call(
+      { ...base, MODEL_CACHE },
+      { authorization: "Bearer sk-relay-xyz" },
+    );
+    expect(res.status).toBe(401);
+    // Nothing usable was obtained, so nothing may be written over the store.
+    expect(MODEL_CACHE.put).not.toHaveBeenCalled();
+  });
+
+  it("gives up quietly when the sign-in start is rejected", async () => {
+    const MODEL_CACHE = kv();
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/v1/client")) {
+          return json({ response: { sessions: [] } }, "__client=boot; Path=/");
+        }
+        return new Response("", { status: 400 });
+      },
+    );
+
+    const res = await call(
+      { ...base, MODEL_CACHE },
+      { authorization: "Bearer sk-relay-xyz" },
+    );
+    expect(res.status).toBe(401);
+    const urls = vi.mocked(fetch).mock.calls.map(([u]) => String(u));
+    // No point attempting the password once the flow has no sign-in to attach to.
+    expect(urls.some((u) => u.includes("attempt_first"))).toBe(false);
+  });
+
+  it("401s with a config error when neither a cookie nor credentials exist", async () => {
+    vi.spyOn(globalThis, "fetch");
+    const res = await call(
+      { RELAY_API_KEY: "sk-relay-xyz" },
+      { authorization: "Bearer sk-relay-xyz" },
+    );
+    expect(res.status).toBe(401);
+    const body = (await res.json()) as { error: { message: string } };
+    expect(body.error.message).toContain("CLERK_EMAIL");
     expect(vi.mocked(fetch)).not.toHaveBeenCalled();
   });
 });

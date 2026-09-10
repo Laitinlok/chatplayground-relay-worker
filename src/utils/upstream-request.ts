@@ -40,7 +40,10 @@ export function buildUpstreamRequest(
     let content: string;
     if (msg.role === "assistant" && msg.tool_calls?.length) {
       const calls = msg.tool_calls
-        .map((tc) => `TOOL_CALL: ${tc.function.name}\nARGUMENTS: ${tc.function.arguments}`)
+        .map(
+          (tc) =>
+            `TOOL_CALL: ${tc.function.name}\nARGUMENTS: ${tc.function.arguments}`,
+        )
         .join("\n\n");
       const flat = flattenContent(msg.content).trim();
       content = flat.length > 0 ? flat : calls;
@@ -49,7 +52,12 @@ export function buildUpstreamRequest(
       content = `[Tool Result]\n${result || "(no result returned)"}\n\nUse this information to answer the user's original question in natural, conversational language. Do not just repeat the tool call or result verbatim.`;
     } else {
       const flat = flattenContent(msg.content);
-      content = flat.length > 0 ? flat : (typeof msg.content === "string" ? msg.content : "");
+      content =
+        flat.length > 0
+          ? flat
+          : typeof msg.content === "string"
+            ? msg.content
+            : "";
     }
 
     return splitUpstreamMessage(role, content);
@@ -70,7 +78,7 @@ export function buildUpstreamRequest(
       content:
         "Tool results are present above. Use them to answer the user's original question. Do not repeat a completed TOOL_CALL or its arguments. If another step is necessary, emit one new TOOL_CALL using the required JSON arguments; otherwise answer directly.",
     });
-  }  
+  }
 
   // OpenAI `metadata.save` extension → !noSave. Default: don't pollute the
   // caller's chatplayground history with API traffic (noSave=true).
@@ -120,7 +128,11 @@ function splitUpstreamMessage(
   }
 
   const chunks: UpstreamMessage[] = [];
-  for (let offset = 0; offset < content.length; offset += MAX_UPSTREAM_MESSAGE_CHARS) {
+  for (
+    let offset = 0;
+    offset < content.length;
+    offset += MAX_UPSTREAM_MESSAGE_CHARS
+  ) {
     chunks.push({
       role,
       content: content.slice(offset, offset + MAX_UPSTREAM_MESSAGE_CHARS),

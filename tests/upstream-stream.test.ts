@@ -122,7 +122,7 @@ function upstreamBody(chunks: string[]): ReadableStream<Uint8Array> {
 function ssePayloads(streamText: string): Array<Record<string, unknown>> {
   return streamText
     .split("\n\n")
-    .filter((event) => event.startsWith("data: {") )
+    .filter((event) => event.startsWith("data: {"))
     .map((event) => JSON.parse(event.slice(6)) as Record<string, unknown>);
 }
 
@@ -136,11 +136,17 @@ describe("Agora reasoning SSE compatibility", () => {
         meta,
       ),
     );
-    const deltas = ssePayloads(output).map((payload) =>
-      ((payload.choices as Array<{ delta: Record<string, unknown> }>)[0]?.delta ?? {}),
+    const deltas = ssePayloads(output).map(
+      (payload) =>
+        (payload.choices as Array<{ delta: Record<string, unknown> }>)[0]
+          ?.delta ?? {},
     );
-    expect(deltas.some((delta) => delta.reasoning_content === "private reasoning")).toBe(true);
-    expect(deltas.some((delta) => delta.content === "public answer")).toBe(true);
+    expect(
+      deltas.some((delta) => delta.reasoning_content === "private reasoning"),
+    ).toBe(true);
+    expect(deltas.some((delta) => delta.content === "public answer")).toBe(
+      true,
+    );
     expect(output).not.toContain("<think>");
   });
 
@@ -151,10 +157,14 @@ describe("Agora reasoning SSE compatibility", () => {
         meta,
       ),
     );
-    const deltas = ssePayloads(output).map((payload) =>
-      ((payload.choices as Array<{ delta: Record<string, unknown> }>)[0]?.delta ?? {}),
+    const deltas = ssePayloads(output).map(
+      (payload) =>
+        (payload.choices as Array<{ delta: Record<string, unknown> }>)[0]
+          ?.delta ?? {},
     );
-    expect(deltas.some((delta) => delta.reasoning_content === "private")).toBe(true);
+    expect(deltas.some((delta) => delta.reasoning_content === "private")).toBe(
+      true,
+    );
     expect(deltas.some((delta) => delta.content === "answer")).toBe(true);
   });
 });

@@ -269,7 +269,7 @@ export function buildToolSystemPrompt(
       ? "You must not call any tool. Answer normally in plain text."
       : toolChoice === "required"
         ? "You must call exactly one tool from the available list."
-          : forcedName
+        : forcedName
           ? `You must call exactly one tool named "${forcedName}".`
           : "If a tool is needed to answer accurately or to complete a multi-step task, call it — do not answer from memory when a tool exists that would give a more current or verified result (e.g. translation, unit conversion via calculator, or live data). Multi-step tasks may require several tool calls across turns, one call per turn, in sequence.";
 

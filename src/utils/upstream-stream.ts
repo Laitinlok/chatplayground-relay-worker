@@ -2,7 +2,11 @@ import type {
   ChatCompletionChunk,
   ChatCompletionChunkDelta,
 } from "../types/openai";
-import { tryParseRelayToolCall, type OpenAITool, type ShimToolCall } from "./tool-shim";
+import {
+  tryParseRelayToolCall,
+  type OpenAITool,
+  type ShimToolCall,
+} from "./tool-shim";
 
 // chatplayground appends `CHAT_ID:<cuid>` at the very end of the stream as a
 // sentinel. CUID format: `c` + ≥20 chars of [a-z0-9]. We strip it before
@@ -14,7 +18,8 @@ const SENTINEL_RE = /CHAT_ID:(c[a-z0-9]{20,})$/;
 // citations; we strip it from the prose and re-format as Markdown so
 // OpenAI-compatible clients render proper links.
 const CITATIONS_RE = /CITATIONS:(\[[\s\S]*?\])/;
-const REASONING_TAG_PATTERN = "<(\\/?)\\s*(think|thinking|reasoning|analysis|thought)\\s*>";
+const REASONING_TAG_PATTERN =
+  "<(\\/?)\\s*(think|thinking|reasoning|analysis|thought)\\s*>";
 const ESCAPED_REASONING_TAG_PATTERN =
   "&lt;(\\/?)\\s*(think|thinking|reasoning|analysis|thought)\\s*&gt;";
 
@@ -123,7 +128,8 @@ export function splitReasoningContent(text: string): SplitReasoningContent {
   const reasoningTagRegex = new RegExp(REASONING_TAG_PATTERN, "gi");
   const normalized = text.replace(
     escapedTagRegex,
-    (_match, closing: string, name: string) => `<${closing}${name.toLowerCase()}>`,
+    (_match, closing: string, name: string) =>
+      `<${closing}${name.toLowerCase()}>`,
   );
   let content = "";
   let reasoningContent = "";
@@ -228,28 +234,31 @@ export function streamUpstreamAsOpenAI(
       object: "chat.completion.chunk",
       created: meta.created,
       model: meta.model,
-      choices: [{
-        index: 0,
-        delta: {
-          tool_calls: [{
-            index: 0,
-            id: `call_${meta.id}`,
-            type: "function",
-            function: {
-                name: toolCall.function.name,
-              // OpenAI schema requires arguments as a JSON *string*, not a
-              // nested object — a common and separate failure point in
-              // relay/harness bridges.
-                arguments: toolCall.function.arguments,
-            },
-          }],
+      choices: [
+        {
+          index: 0,
+          delta: {
+            tool_calls: [
+              {
+                index: 0,
+                id: `call_${meta.id}`,
+                type: "function",
+                function: {
+                  name: toolCall.function.name,
+                  // OpenAI schema requires arguments as a JSON *string*, not a
+                  // nested object — a common and separate failure point in
+                  // relay/harness bridges.
+                  arguments: toolCall.function.arguments,
+                },
+              },
+            ],
+          },
+          finish_reason: "tool_calls",
         },
-        finish_reason: "tool_calls",
-      }],
+      ],
     };
     return encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`);
   }
-
 
   return new ReadableStream({
     async start(controller) {
@@ -274,16 +283,18 @@ export function streamUpstreamAsOpenAI(
         const { content, citations, chatId } = parseTrailers(pending);
         if (chatId) meta.onChatId?.(chatId);
         const toolCall = tryParseRelayToolCall(content, meta.tools);
-         if (toolCall) {
+        if (toolCall) {
           controller.enqueue(toolCallSse(toolCall));
           controller.enqueue(encoder.encode("data: [DONE]\n\n"));
           controller.close();
-        return;
+          return;
         }
 
         const split = splitReasoningContent(content);
         if (split.reasoningContent) {
-          controller.enqueue(sse({ reasoning_content: split.reasoningContent }));
+          controller.enqueue(
+            sse({ reasoning_content: split.reasoningContent }),
+          );
         }
         const visibleContent = split.content || split.reasoningContent;
         const answer = visibleContent + formatCitations(citations);
@@ -371,7 +382,9 @@ export function streamUpstreamWithToolShim(
           controller.enqueue(sse({ role: "assistant" }));
           const split = splitReasoningContent(content);
           if (split.reasoningContent) {
-            controller.enqueue(sse({ reasoning_content: split.reasoningContent }));
+            controller.enqueue(
+              sse({ reasoning_content: split.reasoningContent }),
+            );
           }
           const visibleContent = split.content || split.reasoningContent;
           const answer = visibleContent + formatCitations(citations);

@@ -31,7 +31,12 @@ app.get("/", (c) =>
     name: "chatplayground",
     description:
       "OpenAI-compatible relay for chatplayground.ai (BYOK, stateless).",
-    endpoints: ["/v1/models", "/v1/chat/completions", "/v1/responses", "/v1/files"],
+    endpoints: [
+      "/v1/models",
+      "/v1/chat/completions",
+      "/v1/responses",
+      "/v1/files",
+    ],
   }),
 );
 
