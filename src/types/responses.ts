@@ -4,7 +4,11 @@ import type { OpenAITool, ToolChoice } from "../utils/tool-shim";
 
 export interface ResponsesRequest {
   model: string;
-  input: string | ResponsesInputItem | ResponsesInputItem[];
+  input?: string | ResponsesInputItem | ResponsesInputItem[];
+  // Compatibility fields used by clients that send Chat Completions-shaped
+  // history to a Responses-compatible endpoint.
+  messages?: ResponsesInputItem[];
+  prompt?: string;
   instructions?: string;
   previous_response_id?: string;
   stream?: boolean;
@@ -154,12 +158,13 @@ export function responsesToolChoiceToChatChoice(
 export function responsesToChatRequest(
   req: ResponsesRequest,
 ): ChatCompletionRequest {
+  const source = req.input ?? req.messages ?? req.prompt ?? [];
   const items: ResponsesInputItem[] =
-    typeof req.input === "string"
-      ? [{ role: "user", content: req.input }]
-      : Array.isArray(req.input)
-        ? req.input
-        : [req.input];
+    typeof source === "string"
+      ? [{ role: "user", content: source }]
+      : Array.isArray(source)
+        ? source
+        : [source];
   const messages: OpenAIMessage[] = [];
   if (req.instructions)
     messages.push({ role: "system", content: req.instructions });

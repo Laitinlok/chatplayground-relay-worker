@@ -42,6 +42,14 @@ describe("Responses adapter", () => {
 
     expect(request.messages).toEqual([{ role: "user", content: "Find it" }]);
   });
+  it("uses messages as a compatibility fallback", () => {
+    const request = responsesToChatRequest({
+      model: "gpt-5.6",
+      messages: [{ role: "user", content: "Find it" }],
+    });
+
+    expect(request.messages).toEqual([{ role: "user", content: "Find it" }]);
+  });
   it("preserves function call and function call output history", () => {
     const request = responsesToChatRequest({
       model: "gpt-5.6",

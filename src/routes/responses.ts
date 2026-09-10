@@ -164,13 +164,14 @@ responses.post("/v1/responses", async (c) => {
     throw invalidRequest("Request body must be JSON.");
   if (!raw.model || typeof raw.model !== "string")
     throw invalidRequest("'model' is required.", "model");
+  const input = raw.input ?? raw.messages ?? raw.prompt;
   if (
-    typeof raw.input !== "string" &&
-    !Array.isArray(raw.input) &&
-    (!raw.input || typeof raw.input !== "object")
+    typeof input !== "string" &&
+    !Array.isArray(input) &&
+    (!input || typeof input !== "object")
   )
     throw invalidRequest(
-      "'input' must be a string, object, or array.",
+      "'input' must be a string, object, or array (or provide messages).",
       "input",
     );
 
@@ -178,7 +179,7 @@ responses.post("/v1/responses", async (c) => {
   const model = findModel(raw.model, registry);
   if (!model) throw modelNotFound(raw.model);
 
-  const request = responsesToChatRequest(raw);
+  const request = responsesToChatRequest({ ...raw, input });
   const reasoningEffort = request.reasoning_effort ?? "medium";
   request.reasoning_effort = reasoningEffort;
   request.messages = injectReasoningPrompt(request.messages, reasoningEffort);
