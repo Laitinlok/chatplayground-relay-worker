@@ -1,5 +1,6 @@
 import { createMiddleware } from "hono/factory";
 import type { Env, Variables } from "../types/env";
+import { verifyKey } from "../services/api-keys";
 import { mintSessionToken } from "../utils/clerk-token";
 import { unauthorized } from "../utils/errors";
 
@@ -28,6 +29,18 @@ export const auth = createMiddleware<{
     // Deferred, not minted here: /v1/models and /v1/files need no upstream
     // credential, so they must not pay two Clerk round-trips on a cold isolate
     // — or fail when Clerk does. mintSessionToken caches, so chat pays once.
+    c.set("sessionToken", () => mintSessionToken(c.env));
+    await next();
+    return;
+  }
+
+  // Database-backed keys created by /admin/keys use the rly_ prefix. They
+  // authenticate callers exactly like the static gateway key, then the worker
+  // obtains a short-lived Clerk token for the upstream request.
+  if (bearer?.startsWith("rly_") && c.env.DB) {
+    if (!(await verifyKey(c.env.DB, bearer))) {
+      throw unauthorized("Invalid API key.");
+    }
     c.set("sessionToken", () => mintSessionToken(c.env));
     await next();
     return;
