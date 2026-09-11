@@ -126,9 +126,11 @@ describe("Responses adapter", () => {
     expect(body).toContain(
       'event: response.created\ndata: {"type":"response.created","response":',
     );
-    expect(body).toContain(
-      'event: response.completed\ndata: {"type":"response.completed","response":',
-    );
+    const sequenceNumbers = body
+      .split("\n")
+      .filter((line) => line.startsWith("data: "))
+      .map((line) => JSON.parse(line.slice(6)).sequence_number);
+    expect(sequenceNumbers).toEqual(sequenceNumbers.map((_, index) => index));
   });
   it("does not duplicate the injected tool prompt", () => {
     const tool: OpenAITool[] = [
