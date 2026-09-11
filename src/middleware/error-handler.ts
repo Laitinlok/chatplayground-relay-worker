@@ -7,9 +7,16 @@ export const errorHandler: ErrorHandler<{
   Variables: Variables;
 }> = (err, _c) => {
   if (err instanceof OpenAIHTTPError) {
+    const headers = new Headers({ "content-type": "application/json" });
+    if (err.status === 429) {
+      // ChatPlayground does not provide Retry-After. Prevent compatible clients
+      // from immediately replaying the same request and worsening the burst.
+      headers.set("retry-after", "60");
+      headers.set("x-should-retry", "false");
+    }
     return new Response(JSON.stringify(err.toEnvelope()), {
       status: err.status,
-      headers: { "content-type": "application/json" },
+      headers,
     });
   }
 

@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import app from "../src/index";
 import { errorHandler } from "../src/middleware/error-handler";
+import { upstreamError } from "../src/utils/errors";
 import { resetModelCache } from "../src/utils/model-discovery";
 
 // The wiring in index.ts: what is public, what auth guards, and what CORS
@@ -70,6 +71,18 @@ describe("app wiring", () => {
 });
 
 describe("errorHandler fallback", () => {
+  it("marks upstream rate limits as non-retryable", async () => {
+    const limited = new Hono<any>();
+    limited.onError(errorHandler);
+    limited.get("/", () => {
+      throw upstreamError(429, "too many requests");
+    });
+
+    const res = await limited.request("/");
+    expect(res.status).toBe(429);
+    expect(res.headers.get("retry-after")).toBe("60");
+    expect(res.headers.get("x-should-retry")).toBe("false");
+  });
   it("wraps a non-OpenAIHTTPError as a 500 in the OpenAI envelope", async () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
     // oxlint-disable-next-line typescript/no-explicit-any -- minimal test env stub
