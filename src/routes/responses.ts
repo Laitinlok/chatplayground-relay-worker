@@ -222,12 +222,30 @@ responses.post("/v1/responses", async (c) => {
   });
   if (!upstream.ok || !upstream.body) {
     const detail = (await upstream.text().catch(() => "")).trim();
-    throw upstreamError(
-      upstream.status,
-      detail
-        ? `Upstream returned ${upstream.status}: ${detail.slice(0, 300)}`
-        : `Upstream returned ${upstream.status} with no message.`,
-    );
+    const message = detail
+      ? `Upstream returned ${upstream.status}: ${detail.slice(0, 300)}`
+      : `Upstream returned ${upstream.status} with no message.`;
+    if (raw.stream) {
+      return new Response(
+        event("error", {
+          type: "error",
+          error: {
+            code: `upstream_${upstream.status}`,
+            type:
+              upstream.status === 429 ? "rate_limit_error" : "upstream_error",
+            message,
+          },
+        }),
+        {
+          status: 200,
+          headers: {
+            "content-type": "text/event-stream; charset=utf-8",
+            "cache-control": "no-cache, no-transform",
+          },
+        },
+      );
+    }
+    throw upstreamError(upstream.status, message);
   }
 
   const parsed = await collectUpstream(upstream.body);
