@@ -40,13 +40,10 @@ export function streamResponse(
   const encoder = new TextEncoder();
   return new ReadableStream({
     start(controller) {
-      let sequenceNumber = 0;
-      const send = (type: string, data: Record<string, unknown>) =>
-        event(type, { ...data, sequence_number: sequenceNumber++ });
       const response = { ...result, status: "in_progress" };
       controller.enqueue(
         encoder.encode(
-          send("response.created", {
+          event("response.created", {
             type: "response.created",
             response,
           }),
@@ -54,7 +51,7 @@ export function streamResponse(
       );
       controller.enqueue(
         encoder.encode(
-          send("response.in_progress", {
+          event("response.in_progress", {
             type: "response.in_progress",
             response,
           }),
@@ -64,7 +61,7 @@ export function streamResponse(
       if (toolCall && output?.type === "function_call") {
         controller.enqueue(
           encoder.encode(
-            send("response.output_item.added", {
+            event("response.output_item.added", {
               type: "response.output_item.added",
               output_index: 0,
               item: output,
@@ -73,7 +70,7 @@ export function streamResponse(
         );
         controller.enqueue(
           encoder.encode(
-            send("response.function_call_arguments.delta", {
+            event("response.function_call_arguments.delta", {
               type: "response.function_call_arguments.delta",
               item_id: output.id,
               output_index: 0,
@@ -83,7 +80,7 @@ export function streamResponse(
         );
         controller.enqueue(
           encoder.encode(
-            send("response.function_call_arguments.done", {
+            event("response.function_call_arguments.done", {
               type: "response.function_call_arguments.done",
               item_id: output.id,
               output_index: 0,
@@ -93,7 +90,7 @@ export function streamResponse(
         );
         controller.enqueue(
           encoder.encode(
-            send("response.output_item.done", {
+            event("response.output_item.done", {
               type: "response.output_item.done",
               output_index: 0,
               item: output,
@@ -105,7 +102,7 @@ export function streamResponse(
         const part = output.content[0];
         controller.enqueue(
           encoder.encode(
-            send("response.output_item.added", {
+            event("response.output_item.added", {
               type: "response.output_item.added",
               output_index: 0,
               item: { ...output, content: [] },
@@ -114,7 +111,7 @@ export function streamResponse(
         );
         controller.enqueue(
           encoder.encode(
-            send("response.content_part.added", {
+            event("response.content_part.added", {
               type: "response.content_part.added",
               item_id: output.id,
               output_index: 0,
@@ -126,7 +123,7 @@ export function streamResponse(
         if (text)
           controller.enqueue(
             encoder.encode(
-              send("response.output_text.delta", {
+              event("response.output_text.delta", {
                 type: "response.output_text.delta",
                 item_id: output.id,
                 output_index: 0,
@@ -137,7 +134,7 @@ export function streamResponse(
           );
         controller.enqueue(
           encoder.encode(
-            send("response.output_text.done", {
+            event("response.output_text.done", {
               type: "response.output_text.done",
               item_id: output.id,
               output_index: 0,
@@ -148,7 +145,7 @@ export function streamResponse(
         );
         controller.enqueue(
           encoder.encode(
-            send("response.content_part.done", {
+            event("response.content_part.done", {
               type: "response.content_part.done",
               item_id: output.id,
               output_index: 0,
@@ -159,7 +156,7 @@ export function streamResponse(
         );
         controller.enqueue(
           encoder.encode(
-            send("response.output_item.done", {
+            event("response.output_item.done", {
               type: "response.output_item.done",
               output_index: 0,
               item: output,
@@ -169,7 +166,7 @@ export function streamResponse(
       }
       controller.enqueue(
         encoder.encode(
-          send("response.completed", {
+          event("response.completed", {
             type: "response.completed",
             response: result,
           }),
@@ -232,7 +229,6 @@ responses.post("/v1/responses", async (c) => {
       return new Response(
         event("error", {
           type: "error",
-          sequence_number: 0,
           error: {
             code: `upstream_${upstream.status}`,
             type:

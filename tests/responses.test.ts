@@ -126,11 +126,16 @@ describe("Responses adapter", () => {
     expect(body).toContain(
       'event: response.created\ndata: {"type":"response.created","response":',
     );
-    const sequenceNumbers = body
+    expect(body).toContain('event: response.completed\ndata: {"type":"response.completed","response":');
+    const payloads = body
       .split("\n")
       .filter((line) => line.startsWith("data: "))
-      .map((line) => JSON.parse(line.slice(6)).sequence_number);
-    expect(sequenceNumbers).toEqual(sequenceNumbers.map((_, index) => index));
+      .map((line) => JSON.parse(line.slice(6)) as Record<string, unknown>);
+    expect(payloads.length).toBeGreaterThan(0);
+    for (const payload of payloads) {
+      expect(payload).not.toHaveProperty("sequence_number");
+      expect(typeof payload.type).toBe("string");
+    }
   });
   it("does not duplicate the injected tool prompt", () => {
     const tool: OpenAITool[] = [
