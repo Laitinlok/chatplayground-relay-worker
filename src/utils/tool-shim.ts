@@ -113,6 +113,7 @@ const ARGUMENT_KEY_ALIASES = [
 ];
 const TOOL_NAME_ALIASES: Record<string, string[]> = {
   cron: ["schedule", "scheduler", "reminder", "create_reminder", "cron_add"],
+  web_search: ["web.run", "web_search_preview", "browser.search", "search"],
 };
 const TOOL_CALL_EXAMPLES = [
   `TOOL_CALL: web_search\nARGUMENTS: {"query":"latest TikTok food hacks","num_results":5}`,
@@ -213,7 +214,7 @@ function resolveToolName(
       const scale = Math.max(normalized.length, candidate.normalized.length, 1);
       return { ...candidate, score: 1 - distance / scale };
     })
-    .sort((a, b) => b.score - a.score);
+    .toSorted((a, b) => b.score - a.score);
   const best = scored[0];
   const second = scored[1];
   // Require both a strong match and separation from the runner-up.
@@ -337,7 +338,6 @@ export function injectToolPrompt(
   messages: OpenAIMessage[],
   tools: OpenAITool[],
   toolChoice?: ToolChoice,
-  modelId?: string,
 ): OpenAIMessage[] {
   const toolPrompt = buildToolSystemPrompt(tools, toolChoice);
   const [first, ...rest] = messages;
@@ -363,7 +363,7 @@ const NATIVE_JSON_TOOL_CALL_RE = /"tool_calls"\s*:\s*\[/i;
 const PROSE_TOOL_CALL_RE =
   /\bI\s+(?:called|call|am calling|will call)\s+the\s+"([^"]+)"\s+tool\s+with\s+arguments\s*/i;
 const RECIPIENT_TOOL_CALL_RE =
-  /(?:<\|(?:recipient|channel)\|>|\bto\s*=\s*)(?:functions?|tools?)\.([A-Za-z0-9_.:-]+)[^\n]*?(?:<\|message\|>|<\|constrain\|>json\s*)?/i;
+  /(?:<\|(?:recipient|channel)\|>|\bto\s*=\s*)(?:(?:functions?|tools?)\.|(?=(?:web\.run|browser\.search)\b))([A-Za-z0-9_.:-]+)[^\n]*?(?:<\|message\|>|<\|constrain\|>json\s*)?/i;
 
 function coerceParamValue(
   raw: string,
@@ -480,6 +480,22 @@ function parseRecipientToolCallDialect(text: string): ParsedToolIntent | null {
   return args ? buildIntent({ name: match[1], arguments: args }) : null;
 }
 
+function normalizeToolPayload(text: string): string {
+  return text
+    .trim()
+    .replace(/^```(?:json|javascript|js)?\s*/i, "")
+    .replace(/\s*```$/i, "")
+    .trim();
+}
+
+function parseSearchArgumentAliases(
+  args: Record<string, unknown>,
+): Record<string, unknown> {
+  if (args.query === undefined && typeof args.search_query === "string") {
+    return { ...args, query: args.search_query };
+  }
+  return args;
+}
 function parseJsonObject(json: string): Record<string, unknown> | null {
   try {
     const value: unknown = JSON.parse(json);
@@ -595,15 +611,19 @@ export function tryParseRelayToolCall(
   text: string,
   tools?: OpenAITool[],
 ): ShimToolCall | null {
-  const trimmed = text.trim();
+  const trimmed = normalizeToolPayload(text);
   const toToolCall = (intent: ParsedToolIntent | null): ShimToolCall | null => {
     if (!intent) return null;
     const name = resolveToolName(intent.name, tools);
     if (!name) return null;
+    const argumentsValue =
+      normalizeName(name) === "web_search"
+        ? parseSearchArgumentAliases(intent.arguments)
+        : intent.arguments;
     return {
       id: `call_${crypto.randomUUID().replace(/-/g, "")}`,
       type: "function",
-      function: { name, arguments: JSON.stringify(intent.arguments) },
+      function: { name, arguments: JSON.stringify(argumentsValue) },
     };
   };
 

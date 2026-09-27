@@ -62,6 +62,25 @@ describe("tryParseRelayToolCall", () => {
     expect(call?.function.arguments).toBe('{"query":"latest news"}');
   });
 
+  it("accepts OpenAI web.run recipient calls and normalizes search_query", () => {
+    const call = tryParseRelayToolCall(
+      '<|channel|>commentary to=web.run <|constrain|>json<|message|>{"search_query":"latest news","num_results":3}',
+      tools,
+    );
+    expect(call?.function.name).toBe("web_search");
+    expect(call?.function.arguments).toBe(
+      '{"search_query":"latest news","num_results":3,"query":"latest news"}',
+    );
+  });
+
+  it("accepts fenced JSON tool calls", () => {
+    const call = tryParseRelayToolCall(
+      '```json\n{"name":"web_search_preview","arguments":{"query":"latest news"}}\n```',
+      tools,
+    );
+    expect(call?.function.name).toBe("web_search");
+    expect(call?.function.arguments).toBe('{"query":"latest news"}');
+  });
   it("does not expose an unknown Harmony recipient as a tool call", () => {
     expect(
       tryParseRelayToolCall(
