@@ -5,6 +5,17 @@ import type { UpstreamChatRequest, UpstreamMessage } from "../types/upstream";
 
 const MAX_UPSTREAM_MESSAGE_CHARS = 15_000;
 
+function flattenContent(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content
+      .filter((p): p is { type: string; text?: string } => p?.type === "text")
+      .map((p) => p.text ?? "")
+      .join("\n");
+  }
+  return "";
+}
+
 export interface BuiltUpstreamRequest {
   endpoint: UpstreamEndpoint;
   body: UpstreamChatRequest;
@@ -25,17 +36,6 @@ export function buildUpstreamRequest(
   // tool-role results into plain text instead of dropping/nulling them.
   const messages: UpstreamMessage[] = req.messages.flatMap((msg) => {
     const role = msg.role === "tool" ? "user" : msg.role;
-
-    function flattenContent(content: unknown): string {
-      if (typeof content === "string") return content;
-      if (Array.isArray(content)) {
-        return content
-          .filter((p: any) => p?.type === "text")
-          .map((p: any) => p.text)
-          .join("\n");
-      }
-      return "";
-    }
 
     let content: string;
     if (msg.role === "assistant" && msg.tool_calls?.length) {
@@ -73,10 +73,12 @@ export function buildUpstreamRequest(
   // never actually fires in real traffic.
   const hasToolResultInHistory = req.messages.some((m) => m.role === "tool");
   if (hasToolResultInHistory) {
+    const canCallAnotherTool = req.tools && req.tools.length > 0;
     messages.push({
       role: "system",
-      content:
-        "Tool results are present above. Use them to answer the user's original question. Do not repeat a completed TOOL_CALL or its arguments. If another step is necessary, emit one new TOOL_CALL using the required JSON arguments; otherwise answer directly.",
+      content: canCallAnotherTool
+        ? "Tool results are present above. Use them to answer the user's original question. Do not repeat a completed TOOL_CALL or its arguments. If another step is necessary, emit one new TOOL_CALL using the required JSON arguments; otherwise answer directly."
+        : "A tool result is present above. Use it to answer the user's original question directly. Do not emit another TOOL_CALL, invent a tool, repeat the tool call, or output a sources list. Cite the supplied evidence in the answer when appropriate.",
     });
   }
 
