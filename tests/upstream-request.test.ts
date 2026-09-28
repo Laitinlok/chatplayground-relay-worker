@@ -88,6 +88,17 @@ describe("buildUpstreamRequest — field mapping", () => {
     );
     expect(body.messages[1]?.content).toContain("[Tool Result]\ncreated");
   });
+  it("forwards the requested output token limit", () => {
+    const { body } = buildUpstreamRequest(
+      {
+        model: "gpt-5.5",
+        messages: [{ role: "user", content: "write" }],
+        max_tokens: 321,
+      },
+      AZURE_MODEL,
+    );
+    expect(body).toMatchObject({ maxTokens: 321 });
+  });
   it("forwards GPT reasoning controls to the upstream body", () => {
     const { body } = buildUpstreamRequest(
       {

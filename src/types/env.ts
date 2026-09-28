@@ -1,3 +1,4 @@
+
 export interface Env {
   // Vars from wrangler.jsonc
   UPSTREAM_CHAT_URL: string;
@@ -8,6 +9,10 @@ export interface Env {
   CLERK_FAPI_URL: string;
   // "true" exposes premium models in /v1/models. Unset → non-premium list.
   PREMIUM_MODELS?: string;
+  // Search service configuration. The token is optional; when unset, requests
+  // are sent without a token (the search endpoint must allow unauthenticated access).
+  CLOUDFLARE_SEARCH_URL?: string;
+  CLOUDFLARE_SEARCH_TOKEN?: string;
 
   // Gateway auth (optional — set via `wrangler secret put`). When RELAY_API_KEY
   // is set, callers present it instead of a session token and the worker mints

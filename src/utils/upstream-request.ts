@@ -97,6 +97,9 @@ export function buildUpstreamRequest(
     noSave: !save,
     ...(req.reasoning_effort ? { reasoning_effort: req.reasoning_effort } : {}),
     ...(req.verbosity ? { verbosity: req.verbosity } : {}),
+    ...(req.max_tokens !== undefined
+      ? { maxTokens: req.max_tokens }
+      : {}),
   };
 
   // The model identifier field differs per endpoint (see types/upstream.ts):

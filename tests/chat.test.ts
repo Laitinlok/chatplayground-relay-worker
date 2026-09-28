@@ -173,11 +173,15 @@ describe("POST /v1/chat/completions — upstream failures", () => {
     expect((await envelope(res)).message).toContain("with no message");
   });
 
-  it("treats a 2xx with no body as a failure, not an empty completion", async () => {
-    upstream(() => new Response(null, { status: 204 }));
+  it("rejects a 2xx body that only contains the chat metadata trailer", async () => {
+    upstream(() => new Response(CHAT_ID));
     const res = await post(hello);
     expect(res.status).toBe(502);
-    expect((await envelope(res)).code).toBe("upstream_502");
+    const error = await envelope(res);
+    expect(error.message).toBe(
+      "Provider returned HTTP 200 but no text content.",
+    );
+    expect(error.code).toBe("upstream_502");
   });
 });
 
@@ -250,9 +254,17 @@ describe("POST /v1/chat/completions — non-streaming", () => {
 });
 
 describe("POST /v1/chat/completions — upstream request", () => {
+  it("does not inject reasoning instructions unless requested", async () => {
+    upstream(() => new Response(`ok${CHAT_ID}`));
+    await post(hello);
+    const init = chatCall()[1];
+    const request = JSON.parse(String(init.body));
+    expect(request.messages).toEqual([{ role: "user", content: "Hello" }]);
+    expect(request.reasoning_effort).toBeUndefined();
+  });
+
   it("routes per model and forwards the caller's session JWT", async () => {
     upstream(() => new Response(`ok${CHAT_ID}`));
-
     await post({ ...hello, model: "perplexity-sonar", user: "cabc123" });
     const [url, init] = chatCall();
 

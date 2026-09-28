@@ -18,7 +18,7 @@ OpenAI SDK ──► Cloudflare Worker ──► chatplayground.ai
               (this repo)            (your account)
 ```
 
-No keys stored, no chat history persisted, no database. Just a translator.
+No chat history is persisted. The optional search key is stored as a Worker secret.
 
 ## Status: experimental
 
@@ -459,8 +459,15 @@ different upstream instance.
 | `UPSTREAM_REFERER` | `https://web.chatplayground.ai/` | Forwarded as `Referer` |
 | `UPSTREAM_UPLOAD_URL` | `https://temp-file-host.chatplayground.ai/upload` | File upload endpoint |
 | `PREMIUM_MODELS` | unset | `"true"` lists `premiumOnly` models in `GET /v1/models`. Leave unset unless the account has premium — upstream 403s them otherwise. Any other value counts as off |
+| `ORIO_SEARCH_API_KEY` | secret | Bearer token for the OrioSearch `/search` and `/extract` endpoints |
+| `ORIO_SEARCH_URL` | variable | Base URL of the self-hosted OrioSearch service; configure it in `wrangler.jsonc` `vars` |
+Set the OrioSearch key as a Worker secret before deploying:
 
-Optional KV bindings:
+```sh terminal
+npx wrangler secret put ORIO_SEARCH_API_KEY
+```
+
+For local development, set `ORIO_SEARCH_URL` in `.dev.vars` or `wrangler.jsonc` `vars`, and set only `ORIO_SEARCH_API_KEY` as a secret. OrioSearch provides the `/search` and `/extract` endpoints used by the model-directed Responses tool loop.
 
 | Binding | Purpose |
 |---|---|

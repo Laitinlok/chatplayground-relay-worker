@@ -130,6 +130,15 @@ describe("tryParseRelayToolCall", () => {
     ]);
   });
 
+  it("normalizes OpenAI built-in web search for the relay tool shim", () => {
+    expect(
+      normalizeOpenAITools([{ type: "web_search_preview" }]),
+    ).toMatchObject([
+      { type: "function", function: { name: "web_search" } },
+      { type: "function", function: { name: "web_fetch" } },
+    ]);
+  });
+
   it("injects reasoning instructions with the requested strength", () => {
     const messages = injectReasoningPrompt(
       [{ role: "user", content: "solve this" }],

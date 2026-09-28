@@ -1,6 +1,7 @@
 import type { OpenAIContentPart, OpenAIMessage } from "../types/openai";
 import type { ChatCompletionRequest } from "../types/openai";
 import type { OpenAITool, ToolChoice } from "../utils/tool-shim";
+import { normalizeOpenAITools } from "../utils/tool-shim";
 
 export interface ResponsesRequest {
   model: string;
@@ -35,11 +36,9 @@ export type ResponsesTool =
       parameters?: unknown;
       strict?: boolean;
     }
-  | {
-      type: "web_search" | "web_search_preview";
-      search_context_size?: "low" | "medium" | "high";
-    }
-  | { type: "function"; function: OpenAITool["function"] };
+  | { type: "function"; function: OpenAITool["function"] }
+  | { type: "web_search_preview"; search_context_size?: "low" | "medium" | "high" }
+  | { type: "web_search"; search_context_size?: "low" | "medium" | "high" };
 
 export type ResponsesToolChoice =
   | "none"
@@ -61,13 +60,7 @@ export type ResponsesInputItem = {
 export interface ResponsesOutputText {
   type: "output_text";
   text: string;
-  annotations: Array<{
-    type: "url_citation";
-    url: string;
-    title?: string;
-    start_index?: number;
-    end_index?: number;
-  }>;
+  annotations: unknown[];
 }
 
 export interface ResponsesMessageOutput {
@@ -87,21 +80,14 @@ export interface ResponsesFunctionCallOutput {
   status: "completed";
 }
 
-export interface ResponsesWebSearchResult {
-  title: string;
-  url: string;
-  snippet: string;
-}
-
 export interface ResponsesWebSearchCallOutput {
   type: "web_search_call";
   id: string;
   status: "completed";
-  action: {
-    type: "search";
-    query: string;
-    results?: ResponsesWebSearchResult[];
-  };
+  action:
+    | { type: "search"; query: string }
+    | { type: "open_page"; url: string };
+  results: Array<{ title: string; url: string; snippet: string }>;
 }
 
 export type ResponsesOutput =
@@ -119,35 +105,12 @@ export interface ResponsesResponse {
   id: string;
   object: "response";
   created_at: number;
-  status: "in_progress" | "completed" | "failed";
+  status: "completed";
   model: string;
   output: ResponsesOutput[];
   output_text: string;
   reasoning_content?: string;
-  error?: {
-    code?: string;
-    message: string;
-    type?: string;
-  };
   usage: ResponsesUsage;
-}
-
-function extractSearchQuery(argumentsJson: string): string {
-  try {
-    const parsed: unknown = JSON.parse(argumentsJson);
-    if (!parsed || typeof parsed !== "object") return "";
-    const value = parsed as { query?: unknown; queries?: unknown };
-    if (typeof value.query === "string") return value.query;
-    if (Array.isArray(value.queries))
-      return (
-        value.queries.find(
-          (query): query is string => typeof query === "string",
-        ) ?? ""
-      );
-  } catch {
-    // Keep the output valid even when the model emitted malformed arguments.
-  }
-  return "";
 }
 
 function contentParts(value: unknown): string | OpenAIContentPart[] {
@@ -181,54 +144,23 @@ export function responsesToolsToChatTools(
   tools?: ResponsesTool[],
 ): OpenAITool[] | undefined {
   if (!tools) return undefined;
-  return tools.map((tool) => {
-    if (tool.type === "web_search" || tool.type === "web_search_preview") {
-      return {
-        type: "function",
-        function: {
-          name: "web_search",
-          description: "Search the web for current information.",
-          parameters: {
-            type: "object",
-            properties: {
-              query: { type: "string" },
-              num_results: {
-                type: "integer",
-                description:
-                  "Optional number of search results needed to answer the request. Choose the smallest useful number.",
-                minimum: 1,
-                maximum: 10,
-              },
-              queries: { type: "array", items: { type: "string" } },
-            },
-            additionalProperties: false,
-          },
-        },
-      };
+  return tools.flatMap((tool) => {
+    if (tool.type === "web_search_preview" || tool.type === "web_search") {
+      return normalizeOpenAITools([tool]);
     }
-    if (tool.type === "function") {
-      if ("function" in tool)
-        return { type: "function", function: tool.function };
-      return {
+    if ("function" in tool)
+      return [{ type: "function", function: tool.function }];
+    return [
+      {
         type: "function",
         function: {
           name: tool.name,
           description: tool.description,
           parameters: tool.parameters,
         },
-      };
-    }
-    throw new Error("Unsupported Responses tool type");
+      },
+    ];
   });
-}
-
-export function hasNativeWebSearch(tools?: ResponsesTool[]): boolean {
-  return Boolean(
-    tools?.some(
-      (tool) =>
-        tool.type === "web_search" || tool.type === "web_search_preview",
-    ),
-  );
 }
 
 export function responsesToolChoiceToChatChoice(
@@ -315,60 +247,28 @@ export function chatResultToResponses(
   inputMessages: OpenAIMessage[],
   id = `resp_${crypto.randomUUID().replace(/-/g, "")}`,
   reasoningContent = "",
-  nativeWebSearch = false,
-  searchResults: ResponsesWebSearchResult[] = [],
 ): ResponsesResponse {
   const created_at = Math.floor(Date.now() / 1000);
-  const searchQuery = toolCall
-    ? extractSearchQuery(toolCall.function.arguments)
-    : "";
-  const searchOutput: ResponsesWebSearchCallOutput | null =
-    toolCall && nativeWebSearch && toolCall.function.name === "web_search"
-      ? {
-          type: "web_search_call",
-          id: `ws_${toolCall.id.replace(/^call_/, "")}`,
-          status: "completed",
-          action: {
-            type: "search",
-            query: searchQuery,
-            ...(searchResults.length > 0 ? { results: searchResults } : {}),
-          },
-        }
-      : null;
-  const annotations = searchResults.flatMap((result) => {
-    const start = content.indexOf(result.title);
-    return [
-      {
-        type: "url_citation" as const,
-        url: result.url,
-        title: result.title,
-        ...(start >= 0
-          ? { start_index: start, end_index: start + result.title.length }
-          : {}),
-      },
-    ];
-  });
-  const messageOutput: ResponsesMessageOutput = {
-    type: "message",
-    id: `msg_${id.replace(/^resp_/, "")}`,
-    role: "assistant",
-    status: "completed",
-    content: [{ type: "output_text", text: content, annotations }],
-  };
   const output: ResponsesOutput[] = toolCall
-    ? searchOutput
-      ? [searchOutput, ...(content ? [messageOutput] : [])]
-      : [
-          {
-            type: "function_call",
-            id: `fc_${toolCall.id.replace(/^call_/, "")}`,
-            call_id: toolCall.id,
-            name: toolCall.function.name,
-            arguments: toolCall.function.arguments,
-            status: "completed",
-          },
-        ]
-    : [messageOutput];
+    ? [
+        {
+          type: "function_call",
+          id: `fc_${toolCall.id.replace(/^call_/, "")}`,
+          call_id: toolCall.id,
+          name: toolCall.function.name,
+          arguments: toolCall.function.arguments,
+          status: "completed",
+        },
+      ]
+    : [
+        {
+          type: "message",
+          id: `msg_${id.replace(/^resp_/, "")}`,
+          role: "assistant",
+          status: "completed",
+          content: [{ type: "output_text", text: content, annotations: [] }],
+        },
+      ];
   const input_tokens = Math.ceil(
     inputMessages.reduce(
       (sum, message) =>
@@ -385,7 +285,7 @@ export function chatResultToResponses(
     status: "completed",
     model,
     output,
-    output_text: toolCall && !searchOutput ? "" : content,
+    output_text: toolCall ? "" : content,
     ...(reasoningContent ? { reasoning_content: reasoningContent } : {}),
     usage: {
       input_tokens,

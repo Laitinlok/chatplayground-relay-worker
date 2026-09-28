@@ -1,6 +1,7 @@
-# chatplayground worker has no required secrets — auth is BYOK from the caller.
-# This file is only here so future dev-only overrides have a home.
-# Copy to .dev.vars (gitignored) if you need to override anything.
+# Web search uses your configured Cloudflare Search service.
+# Copy to .dev.vars (gitignored) for local development.
 #
 # Example (uncomment to use):
 # UPSTREAM_CHAT_URL=https://app.chatplayground.ai/api/chat/azure
+# CLOUDFLARE_SEARCH_URL=https://search.example.com
+# CLOUDFLARE_SEARCH_TOKEN=your-search-service-token

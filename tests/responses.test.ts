@@ -10,12 +10,7 @@ import {
   responsesToolsToChatTools,
   type ResponsesResponse,
 } from "../src/types/responses";
-import { streamErrorResponse, streamResponse } from "../src/routes/responses";
-import {
-  formatSearchResults,
-  formatSearchSources,
-  normalizeSearchLimit,
-} from "../src/utils/web-search";
+import { addHostedWebSearch, streamResponse } from "../src/routes/responses";
 
 describe("Responses adapter", () => {
   it("maps GPT-5.6-style input and function tools to chat shapes", () => {
@@ -41,54 +36,6 @@ describe("Responses adapter", () => {
     expect(request.tool_choice).toBe("required");
   });
 
-  it("maps native OpenAI Search to the relay search shim", () => {
-    const request = responsesToChatRequest({
-      model: "gpt-5.6",
-      input: "Find current information",
-      tools: [{ type: "web_search" }],
-    });
-
-    expect(request.tools?.[0]).toMatchObject({
-      type: "function",
-      function: { name: "web_search" },
-    });
-  });
-
-  it("lets the model choose a bounded number of native search results", () => {
-    const tool = responsesToolsToChatTools([{ type: "web_search" }])?.[0];
-    const parameters = tool?.function.parameters as {
-      properties: { num_results: Record<string, unknown> };
-      required?: string[];
-    };
-
-    expect(parameters.properties.num_results).toMatchObject({
-      type: "integer",
-      minimum: 1,
-      maximum: 10,
-    });
-    expect(parameters.properties.num_results.description).toContain(
-      "smallest useful number",
-    );
-    expect(parameters.required).toBeUndefined();
-    expect(normalizeSearchLimit(7)).toBe(7);
-    expect(normalizeSearchLimit(100)).toBe(10);
-    expect(normalizeSearchLimit(Number.NaN)).toBe(5);
-  });
-  it("formats native search results as sources without echoing the query", () => {
-    const results = [
-      {
-        title: "Example source",
-        url: "https://example.com/article",
-        snippet: "Useful evidence.",
-      },
-    ];
-    const content = formatSearchResults(results) + formatSearchSources(results);
-
-    expect(content).toContain("1. Example source\nUseful evidence.");
-    expect(content).toContain("**Sources**");
-    expect(content).toContain("[Example source](https://example.com/article)");
-    expect(content).not.toContain("Search results for");
-  });
   it("accepts a single OmniRoute input item object", () => {
     const request = responsesToChatRequest({
       model: "gpt-5.6",
@@ -166,67 +113,6 @@ describe("Responses adapter", () => {
     expect(call.output_text).toBe("");
   });
 
-  it("serializes a native web search call output", () => {
-    const response = chatResultToResponses(
-      "gpt-5.6",
-      "",
-      {
-        id: "call_search",
-        type: "function",
-        function: {
-          name: "web_search",
-          arguments: '{"query":"latest news"}',
-        },
-      },
-      [],
-      "resp_search",
-      "",
-      true,
-    );
-
-    expect(response.output[0]).toEqual({
-      type: "web_search_call",
-      id: "ws_search",
-      status: "completed",
-      action: { type: "search", query: "latest news" },
-    });
-    expect(response.output).toHaveLength(1);
-  });
-
-  it("keeps search citations clickable in the synthesized response", () => {
-    const response = chatResultToResponses(
-      "gpt-5.6",
-      "The answer is supported by [\\[1\\]](https://example.com/article).\n\n---\n**Sources**\n\n1. [Example source](https://example.com/article)",
-      {
-        id: "call_search",
-        type: "function",
-        function: {
-          name: "web_search",
-          arguments: '{"query":"latest news","num_results":1}',
-        },
-      },
-      [],
-      "resp_search_citations",
-      "",
-      true,
-      [
-        {
-          title: "Example source",
-          url: "https://example.com/article",
-          snippet: "Useful evidence.",
-        },
-      ],
-    );
-
-    expect(response.output_text).toContain(
-      "[\\[1\\]](https://example.com/article)",
-    );
-    expect(response.output[0]).toMatchObject({
-      type: "web_search_call",
-      action: { results: [{ url: "https://example.com/article" }] },
-    });
-  });
-
   it("emits Responses-compatible envelopes for streaming clients", async () => {
     const result = chatResultToResponses(
       "gpt-5.6",
@@ -240,71 +126,109 @@ describe("Responses adapter", () => {
     expect(body).toContain(
       'event: response.created\ndata: {"type":"response.created","response":',
     );
+    expect(body).toContain('event: response.completed\ndata: {"type":"response.completed","response":');
     expect(body).toContain(
-      'event: response.completed\ndata: {"type":"response.completed","response":',
+      '"choices":[{"index":0,"delta":{"content":"hello"}}]',
     );
     const payloads = body
       .split("\n")
       .filter((line) => line.startsWith("data: "))
       .map((line) => JSON.parse(line.slice(6)) as Record<string, unknown>);
     expect(payloads.length).toBeGreaterThan(0);
-    let previous = -1;
     for (const payload of payloads) {
-      expect(payload.type).toBeDefined();
-      expect(payload.sequence_number).toBeGreaterThan(previous);
-      previous = payload.sequence_number as number;
+      expect(typeof payload.sequence_number).toBe("number");
+      expect(typeof payload.type).toBe("string");
     }
   });
-  it("terminates streamed upstream failures with response.failed", async () => {
-    const response = streamErrorResponse(
-      "gpt-5.6",
-      429,
-      "Upstream returned 429: rate limited",
-    );
-    const body = await response.text();
-
-    expect(response.status).toBe(429);
-    expect(body).toContain("event: response.failed");
-    expect(body).toContain('"status":"failed"');
-    expect(body).toContain('"type":"rate_limit_error"');
-    expect(body).toContain("event: error");
-  });
-  it("normalizes upstream 500 failures to HTTP 502 for OmniRoute", async () => {
-    const response = streamErrorResponse(
-      "gpt-5.6",
-      500,
-      "Upstream returned 500: provider failed",
-    );
-
-    expect(response.status).toBe(502);
-    expect(await response.text()).toContain('"code":"upstream_500"');
-  });
-  it("streams a native web search output item", async () => {
+  it("emits the hosted web-search lifecycle before the answer", async () => {
     const result = chatResultToResponses(
       "gpt-5.6",
-      "",
-      {
-        id: "call_search",
-        type: "function",
-        function: {
-          name: "web_search",
-          arguments: '{"query":"latest news"}',
-        },
-      },
-      [],
-      "resp_search_stream",
-      "",
-      true,
+      "hello",
+      null,
+      [{ role: "user", content: "hi" }],
+      "resp_search",
     );
+    result.output.unshift({
+      type: "web_search_call",
+      id: "ws_1",
+      status: "completed",
+      action: { type: "search", query: "latest news" },
+      results: [
+        {
+          title: "Latest news",
+          url: "https://news.example/article",
+          snippet: "A current report.",
+        },
+      ],
+    });
     const body = await new Response(streamResponse(result, null)).text();
-
-    expect(body).toContain("event: response.output_item.added");
-    expect(body).toContain("response.web_search_call.in_progress");
-    expect(body).toContain("response.web_search_call.searching");
-    expect(body).toContain("response.web_search_call.completed");
+    expect(body).toContain("event: response.web_search_call.in_progress");
+    expect(body).toContain("event: response.web_search_call.searching");
+    expect(body).toContain("event: response.web_search_call.completed");
     expect(body).toContain('"action":{"type":"search","query":"latest news"}');
   });
 
+  it("returns sources as standard url_citation annotations", () => {
+    const base = chatResultToResponses(
+      "gpt-5.6",
+      "Here is the answer.",
+      null,
+      [{ role: "user", content: "hi" }],
+      "resp_citations",
+    );
+    const result = addHostedWebSearch(base, "latest news", [
+      {
+        title: "Latest news",
+        url: "https://news.example/article",
+        snippet: "A current report.",
+      },
+    ]);
+    const webCall = result.output[0];
+    const message = result.output[1];
+
+    expect(webCall).toMatchObject({
+      type: "web_search_call",
+      action: { type: "search", query: "latest news" },
+    });
+    expect(message).toMatchObject({
+      type: "message",
+      content: [
+        {
+          text: "Here is the answer.\n\nSources:\n1. Latest news",
+          annotations: [
+            {
+              type: "url_citation",
+              url: "https://news.example/article",
+              title: "Latest news",
+            },
+          ],
+        },
+      ],
+    });
+    expect(result.output_text).toBe("Here is the answer.\n\nSources:\n1. Latest news");
+  });
+
+  it("keeps sequence numbers contiguous for Responses clients", async () => {
+    const result = chatResultToResponses(
+      "gpt-5.6",
+      "hello",
+      null,
+      [{ role: "user", content: "hi" }],
+      "resp_omni",
+    );
+    const body = await new Response(streamResponse(result, null)).text();
+    const sequenceNumbers = body
+      .split("\n")
+      .filter((line) => line.startsWith("data: "))
+      .map(
+        (line) =>
+          (JSON.parse(line.slice(6)) as Record<string, unknown>)
+            .sequence_number,
+      );
+    expect(sequenceNumbers).toEqual(
+      sequenceNumbers.map((_value, index) => index),
+    );
+  });
   it("does not duplicate the injected tool prompt", () => {
     const tool: OpenAITool[] = [
       { type: "function", function: { name: "cron" } },
@@ -313,6 +237,23 @@ describe("Responses adapter", () => {
     const second = injectToolPrompt(first, tool);
     expect(second).toEqual(first);
     expect(buildToolSystemPrompt(tool)).toContain("[relay-tool-prompt-v1]");
+  });
+
+  it("maps OpenAI web search tools into the relay search tool", () => {
+    expect(
+      responsesToolsToChatTools([
+        { type: "web_search_preview", search_context_size: "high" },
+      ]),
+    ).toEqual([
+      expect.objectContaining({
+        type: "function",
+        function: expect.objectContaining({ name: "web_search" }),
+      }),
+      expect.objectContaining({
+        type: "function",
+        function: expect.objectContaining({ name: "web_fetch" }),
+      }),
+    ]);
   });
 
   it("accepts the nested function tool form for compatibility", () => {

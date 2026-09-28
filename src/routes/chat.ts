@@ -29,6 +29,11 @@ import {
   normalizeOpenAITools,
   tryParseRelayToolCall,
 } from "../utils/tool-shim";
+import {
+  webSearch,
+  formatWebSearchContext,
+} from "../utils/cloudflare-search-api";
+import { sanitizeSearchQuery } from "../utils/search-query";
 
 const chat = new Hono<{ Bindings: Env; Variables: Variables }>();
 
@@ -99,28 +104,55 @@ chat.post("/v1/chat/completions", async (c) => {
     }
   }
 
-  // Agora's built-in OpenAI provider sends reasoning_effort for GPT-5/o-series
-  // only when Thinking is enabled. Mirror that explicit signal into the
-  // upstream prompt. Default to medium so providers that ignore
-  // reasoning_effort still receive an explicit thinking instruction.
-  const reasoningEffort = body.reasoning_effort ?? "medium";
-  body.reasoning_effort = reasoningEffort;
-  // Snapshot original messages before injection so estimateUsage only counts
-  // the caller's actual content, not injected reasoning/tool prompts.
+  // Preserve the caller's system prompt unless reasoning was explicitly
+  // requested. A default reasoning instruction can consume the answer budget
+  // and override application-level system instructions.
+  const reasoningEffort = body.reasoning_effort;
   const originalMessages = body.messages;
-  body.messages = injectReasoningPrompt(body.messages, reasoningEffort);
+  if (reasoningEffort) {
+    body.messages = injectReasoningPrompt(body.messages, reasoningEffort);
+  }
 
   // Prompt-injection tool-calling shim: inject exactly one authoritative
   // tool prompt, then parse the model's reply back into OpenAI tool_calls.
   const requestedTools = normalizeOpenAITools(body.tools);
-  const toolsRequested = requestedTools.length > 0;
+  const webSearchRequested = requestedTools.some(
+    (tool) => tool.function.name === "web_search",
+  );
+  const toolsForModel = requestedTools.filter(
+    (tool) => tool.function.name !== "web_search",
+  );
+  const toolsRequested = toolsForModel.length > 0;
+  if (webSearchRequested) {
+    const latestUserMessage = [...originalMessages]
+      .reverse()
+      .find((message) => message.role === "user");
+    const query = sanitizeSearchQuery(
+      typeof latestUserMessage?.content === "string"
+        ? latestUserMessage.content
+        : "",
+    );
+    const results = await webSearch(query, {
+      url: c.env.CLOUDFLARE_SEARCH_URL,
+      token: c.env.CLOUDFLARE_SEARCH_TOKEN,
+    });
+    body.messages = [
+      {
+        role: "system",
+        content: formatWebSearchContext(query, results),
+      },
+      ...body.messages,
+    ];
+  }
   if (toolsRequested) {
-    body.tools = requestedTools;
+    body.tools = toolsForModel;
     body.messages = injectToolPrompt(
       body.messages,
-      requestedTools,
+      toolsForModel,
       body.tool_choice,
     );
+  } else {
+    body.tools = undefined;
   }
 
   const { endpoint, body: upstreamBody } = buildUpstreamRequest(body, model);
@@ -210,13 +242,17 @@ chat.post("/v1/chat/completions", async (c) => {
   // Expose reasoning separately so Agora renders a collapsible thought block
   // instead of showing raw <think> tags in the assistant answer.
   const split = splitReasoningContent(rawContent);
+  const answerText = split.content || split.reasoningContent;
+  if (!answerText.trim() && !toolCall) {
+    throw upstreamError(
+      200,
+      "Provider returned HTTP 200 but no text content.",
+    );
+  }
   const content =
     citations.length === 0
-      ? split.content || split.reasoningContent
-      : inlineCitationLinks(
-          split.content || split.reasoningContent,
-          citations,
-        ) + formatCitations(citations);
+      ? answerText
+      : inlineCitationLinks(answerText, citations) + formatCitations(citations);
 
   const response: ChatCompletionResponse = {
     id,

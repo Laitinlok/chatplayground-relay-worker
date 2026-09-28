@@ -22,6 +22,46 @@ export function normalizeOpenAITools(tools: unknown): OpenAITool[] {
   return tools.flatMap((tool): OpenAITool[] => {
     if (!tool || typeof tool !== "object") return [];
     const candidate = tool as Record<string, unknown>;
+    if (candidate.type === "web_search_preview" || candidate.type === "web_search") {
+      return [
+        {
+          type: "function",
+          function: {
+            name: "web_search",
+            description:
+              "Search the web for a specific query. Choose max_results based on the evidence needed, from 1 to 50.",
+            parameters: {
+              type: "object",
+              properties: {
+                query: { type: "string", description: "Focused search query" },
+                max_results: {
+                  type: "integer",
+                  minimum: 1,
+                  maximum: 50,
+                  description: "Number of relevant results needed",
+                },
+              },
+              required: ["query"],
+            },
+          },
+        },
+        {
+          type: "function",
+          function: {
+            name: "web_fetch",
+            description:
+              "Retrieve the full text for a URL returned by a previous web_search call. Use this to inspect a promising result before answering.",
+            parameters: {
+              type: "object",
+              properties: {
+                url: { type: "string", description: "URL from a search result" },
+              },
+              required: ["url"],
+            },
+          },
+        },
+      ];
+    }
     if (candidate.type !== "function") return [];
 
     const nested = candidate.function;
@@ -281,6 +321,12 @@ export function buildToolSystemPrompt(
   }));
 
   const decisionRules = [
+    ...(tools.some((tool) => tool.function.name === "web_search")
+      ? [
+          "For web research, choose the search query and max_results needed for the question. Use multiple focused searches when they cover distinct subquestions or you need to verify key claims.",
+          "After search results arrive, use web_fetch on relevant returned URLs when snippets are insufficient. Continue searching or fetching if evidence gaps remain, then synthesize the sources into the final answer.",
+        ]
+      : []),
     "If a tool is needed, emit the call immediately; do not preface it with statements such as 'I will search'.",
     "If you are not calling a tool, respond with normal plain-text prose as usual.",
   ];

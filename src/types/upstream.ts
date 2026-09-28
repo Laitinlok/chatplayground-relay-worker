@@ -35,6 +35,7 @@ interface UpstreamBodyBase {
   noSave: boolean;
   reasoning_effort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
   verbosity?: "low" | "medium" | "high";
+  maxTokens?: number;
 }
 
 // /api/chat/azure — model is the full slug; no apiKey field.
