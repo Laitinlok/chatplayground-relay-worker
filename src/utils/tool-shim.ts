@@ -320,7 +320,19 @@ export function buildToolSystemPrompt(
     parameters: t.function.parameters ?? { type: "object", properties: {} },
   }));
 
+  const fileEditTools = tools.filter((tool) =>
+    /(?:edit|write|patch|apply|create|delete|read|replace|multi_edit|str_replace|apply_patch).*(?:file|code|project)|(?:file|code|project).*(?:edit|write|patch|apply|create|delete|read|replace)|(?:edit_file|write_file|patch_file|apply_patch|multi_edit|str_replace_editor)/i.test(
+      `${tool.function.name} ${tool.function.description ?? ""}`,
+    ),
+  );
   const decisionRules = [
+    ...(fileEditTools.length
+      ? [
+          "For requests to modify, create, or fix project files, you MUST use an available file/code tool to perform the change directly. Do not answer with a code block, diff, patch text, or instructions instead of invoking the edit tool.",
+          "Choose the file tool matching the requested operation, supply its required arguments in the exact schema shown in the tool catalog, and call it immediately. For multi-step edits, read the current file first, then edit, then inspect or test the result. Never claim a change succeeded unless the tool returns success.",
+          "A request such as 'fix this', 'change the code', or 'apply this fix' means edit the workspace files when a suitable file-editing tool is available; do not interpret it as a request to merely demonstrate code.",
+        ]
+      : []),
     ...(tools.some((tool) => tool.function.name === "web_search")
       ? [
           "For web research, choose the search query and max_results needed for the question. Use multiple focused searches when they cover distinct subquestions or you need to verify key claims.",

@@ -459,7 +459,6 @@ responses.post("/v1/responses", async (c) => {
       request.messages,
       toolsForModel,
       webSearchRequested ? "auto" : request.tool_choice,
-      model.id,
     );
   }
 
