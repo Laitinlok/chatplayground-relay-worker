@@ -18,7 +18,7 @@ OpenAI SDK ──► Cloudflare Worker ──► chatplayground.ai
               (this repo)            (your account)
 ```
 
-No chat history is persisted. The optional search key is stored as a Worker secret.
+The relay does not persist chat history. Hosted web search can use a configured Cloudflare Search service; its token is optional and omitted from requests when unset.
 
 ## Status: experimental
 
@@ -151,13 +151,13 @@ live cookie.
 
 | Endpoint | Notes |
 |---|---|
-| `POST /v1/chat/completions` | Stream + non-stream; multimodal (`image_url` content parts) |
+| `POST /v1/chat/completions` | Stream + non-stream; multimodal (`image_url` content parts); relay-hosted `web_search` / `web_fetch` tools |
 | `GET /v1/models` | Dynamic discovery from chatplayground's `/api/models`, KV + memory cached; `premiumOnly` models hidden unless `PREMIUM_MODELS="true"` |
 | `POST /v1/files` | Image upload proxy → returns a URL usable as `image_url.url` |
 
 | Not supported | Why |
 |---|---|
-| Tool / function calling | No upstream chat endpoint exposes tool use |
+| Native upstream tool calling | Upstream chat endpoints do not implement native tool calls; the relay provides a prompt-based compatibility shim for requested tools |
 | `/v1/images/generations` | Upstream image-gen models live on a different endpoint |
 | `/v1/embeddings` | Upstream doesn't expose embeddings |
 | `/v1/audio/*` | Upstream doesn't expose audio |
@@ -459,15 +459,16 @@ different upstream instance.
 | `UPSTREAM_REFERER` | `https://web.chatplayground.ai/` | Forwarded as `Referer` |
 | `UPSTREAM_UPLOAD_URL` | `https://temp-file-host.chatplayground.ai/upload` | File upload endpoint |
 | `PREMIUM_MODELS` | unset | `"true"` lists `premiumOnly` models in `GET /v1/models`. Leave unset unless the account has premium — upstream 403s them otherwise. Any other value counts as off |
-| `ORIO_SEARCH_API_KEY` | secret | Bearer token for the OrioSearch `/search` and `/extract` endpoints |
-| `ORIO_SEARCH_URL` | variable | Base URL of the self-hosted OrioSearch service; configure it in `wrangler.jsonc` `vars` |
-Set the OrioSearch key as a Worker secret before deploying:
+| `CLOUDFLARE_SEARCH_URL` | unset | Base URL for the configured Cloudflare Search service. The relay sends searches to its `/search` endpoint. |
+| `CLOUDFLARE_SEARCH_TOKEN` | unset | Optional search-service token. If unset, the relay sends no token; the endpoint must permit unauthenticated requests. |
 
-```sh terminal
-npx wrangler secret put ORIO_SEARCH_API_KEY
+Set `CLOUDFLARE_SEARCH_URL` as a Worker variable in `wrangler.jsonc` `vars` (or `.dev.vars` locally). Set `CLOUDFLARE_SEARCH_TOKEN` as a Worker secret only if the service requires authentication:
+
+```sh
+npx wrangler secret put CLOUDFLARE_SEARCH_TOKEN
 ```
 
-For local development, set `ORIO_SEARCH_URL` in `.dev.vars` or `wrangler.jsonc` `vars`, and set only `ORIO_SEARCH_API_KEY` as a secret. OrioSearch provides the `/search` and `/extract` endpoints used by the model-directed Responses tool loop.
+The configured service returns search-result snippets. The relay exposes `web_search` and `web_fetch` to compatible requests; `web_fetch` can return the snippet for a URL from the search results, but does not retrieve full page contents.
 
 | Binding | Purpose |
 |---|---|
@@ -475,11 +476,7 @@ For local development, set `ORIO_SEARCH_URL` in `.dev.vars` or `wrangler.jsonc` 
 
 ## Caveats
 
-1. **No tool / function calling.** None of the upstream chat endpoints
-   (`azure` / `perplexity` / `lmsys`) support it — live-tested: injected
-   OpenAI `tools` are ignored and answered as prose, and a forced
-   `tool_choice` returns a plain-text error, never a structured `tool_calls`
-   reply. The relay also never forwards `tools` / `tool_choice` upstream.
+1. **Tool calling uses a relay compatibility shim.** The upstream chat endpoints (`azure` / `perplexity` / `lmsys`) do not natively accept OpenAI `tools` or `tool_choice`. When tools are requested, the relay prompts the model to emit a supported tool-call format, parses it, and executes hosted web-search calls in the relay. This is a compatibility layer rather than native upstream tool calling; behavior can vary across models.
 2. **No real usage counts.** chatplayground doesn't return token usage, so
    the `usage` field is estimated (chars ÷ 4). Don't bill on it.
 3. **Premium models 403 on a non-premium account.** The feed marks 12 of its

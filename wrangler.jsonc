@@ -18,7 +18,7 @@
     "UPSTREAM_REFERER": "https://web.chatplayground.ai/",
     "UPSTREAM_UPLOAD_URL": "https://temp-file-host.chatplayground.ai/upload",
     "CLERK_FAPI_URL": "https://clerk.chatplayground.ai",
-    "CLOUDFLARE_SEARCH_URL": "https://search.laitinlok.com"
+    "CLOUDFLARE_SEARCH_URL": "https://cloudflare-search.chatplayground.workers.dev"
 
     // Uncomment once the account has premium access — exposes the 12
     // premiumOnly models in /v1/models. Without it they 403 upstream.
