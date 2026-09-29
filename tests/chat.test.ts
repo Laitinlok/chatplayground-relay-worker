@@ -185,6 +185,45 @@ describe("POST /v1/chat/completions — upstream failures", () => {
   });
 });
 
+describe("POST /v1/chat/completions — delegated search tools", () => {
+  it("returns web_search tool calls to the OpenAI-compatible client", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/api/models")) return Response.json(FEED);
+        return new Response(
+          `TOOL_CALL: web_search\nARGUMENTS: {"query":"latest TikTok food hacks","max_results":5}${CHAT_ID}`,
+        );
+      },
+    );
+
+    const res = await post(
+      {
+        ...hello,
+        messages: [{ role: "user", content: "Latest TikTok food hacks" }],
+        tools: [{ type: "web_search_preview" }],
+      },
+      { ...env, CLOUDFLARE_SEARCH_URL: "https://search.example.test" },
+    );
+
+    expect(res.status).toBe(200);
+    const payload = (await res.json()) as ChatCompletionResponse;
+    expect(payload.choices[0]?.finish_reason).toBe("tool_calls");
+    expect(payload.choices[0]?.message.tool_calls?.[0]).toMatchObject({
+      type: "function",
+      function: {
+        name: "web_search",
+        arguments: JSON.stringify({
+          query: "latest TikTok food hacks",
+          max_results: 5,
+        }),
+      },
+    });
+    expect(fetchMock.mock.calls.some(([url]) => String(url) === "https://search.example.test/search")).toBe(false);
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).includes("/api/chat/")).length).toBe(1);
+  });
+});
+
 describe("POST /v1/chat/completions — non-streaming", () => {
   it("returns an OpenAI envelope with the trailer stripped", async () => {
     upstream(() => new Response(`Hi there!${CHAT_ID}`));

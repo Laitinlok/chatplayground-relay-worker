@@ -29,20 +29,12 @@ import {
   normalizeOpenAITools,
   tryParseRelayToolCall,
 } from "../utils/tool-shim";
-import {
-  webSearch,
-  webFetchFromSearchResults,
-  type WebSearchResult,
-} from "../utils/cloudflare-search-api";
 import { sanitizeSearchQuery } from "../utils/search-query";
-
-const MAX_HOSTED_TOOL_STEPS = 8;
-const MAX_WEB_SEARCH_CALLS = 4;
-const MAX_SEARCH_RESULTS_PER_CALL = 50;
 
 const chat = new Hono<{ Bindings: Env; Variables: Variables }>();
 
 const CHAT_CACHE_TTL_SECONDS = 60 * 60 * 24 * 7; // 7 days
+const MAX_SEARCH_RESULTS_PER_CALL = 50;
 
 async function chatCacheKey(
   sessionToken: string,
@@ -118,10 +110,13 @@ chat.post("/v1/chat/completions", async (c) => {
     body.messages = injectReasoningPrompt(body.messages, reasoningEffort);
   }
 
-  // Keep both hosted search tools available to the model. The relay runs each
-  // search/fetch call between model turns so any supported model can research
-  // and then synthesize an answer without depending on client-side tool loops.
+  // Advertise the relay's hosted search tools as ordinary OpenAI function tools.
+  // Chat Completions returns calls to Agora/the client; unlike Responses, this
+  // endpoint does not execute web_search or web_fetch inside the Worker.
   const requestedTools = normalizeOpenAITools(body.tools);
+  const webSearchToolRequested = requestedTools.some(
+    (tool) => tool.function.name === "web_search",
+  );
   const webSearchRequested = requestedTools.some(
     (tool) => tool.function.name === "web_search" || tool.function.name === "web_fetch",
   );
@@ -165,13 +160,15 @@ chat.post("/v1/chat/completions", async (c) => {
   }
   const toolsRequested = toolsForModel.length > 0;
   if (webSearchRequested) {
-    // Do not let a caller's `required` choice make the model repeat a tool call
-    // after each hosted result instead of completing its response.
+    // Keep search model-directed: the model must emit a web_search tool call,
+    // which the relay executes and returns as a tool result. Do not pre-run
+    // hosted search here, because that bypasses the tool-call exchange clients
+    // such as Agora expect to see and misses the model's own focused query.
     body.tool_choice = "auto";
     body.messages.push({
       role: "system",
       content:
-        "For web research, the first tool call must be web_search. Never call web_fetch before web_search has returned the URL. Use web_fetch on relevant search-result URLs when snippets are insufficient. After each tool result, decide whether a different focused web_search or another fetch is needed, then answer using the gathered evidence." ,
+        "The user requested web research. You must begin by calling web_search with a focused query; do not answer before the search tool returns. Then use web_fetch on relevant returned URLs when snippets are insufficient. If evidence is still missing, make another distinct web_search call. After research is sufficient, answer normally without another tool call.",
     });
   }
   body.tools = toolsRequested ? toolsForModel : undefined;
@@ -185,108 +182,64 @@ chat.post("/v1/chat/completions", async (c) => {
 
   const id = `chatcmpl-${crypto.randomUUID()}`;
   const created = Math.floor(Date.now() / 1000);
-  const searches: Array<{ query: string; results: WebSearchResult[] }> = [];
-  const fetchedPages = new Map<string, WebSearchResult>();
   let rawContent = "";
   let citations: readonly string[] = [];
   let chatId: string | null = null;
   let toolCall: ReturnType<typeof tryParseRelayToolCall> = null;
 
-  for (let step = 0; step <= MAX_HOSTED_TOOL_STEPS; step++) {
-    const built = buildUpstreamRequest(body, model);
-    console.log("UPSTREAM BODY:", JSON.stringify(built.body));
-    const upstream = await fetch(
-      endpointUrl(built.endpoint, c.env.UPSTREAM_CHAT_URL),
-      {
-        method: "POST",
-        headers: buildUpstreamHeaders(sessionToken, c.env),
-        body: JSON.stringify(built.body),
-        signal: AbortSignal.timeout(CHAT_TIMEOUT),
-      },
+  const built = buildUpstreamRequest(body, model);
+  console.log("UPSTREAM BODY:", JSON.stringify(built.body));
+  const upstream = await fetch(
+    endpointUrl(built.endpoint, c.env.UPSTREAM_CHAT_URL),
+    {
+      method: "POST",
+      headers: buildUpstreamHeaders(sessionToken, c.env),
+      body: JSON.stringify(built.body),
+      signal: AbortSignal.timeout(CHAT_TIMEOUT),
+    },
+  );
+
+  if (!upstream.ok || !upstream.body) {
+    const detail = (await upstream.text().catch(() => "")).trim();
+    throw upstreamError(
+      upstream.status,
+      detail
+        ? `Upstream returned ${upstream.status}: ${detail.slice(0, 300)}`
+        : `Upstream returned ${upstream.status} with no message.`,
     );
+  }
 
-    if (!upstream.ok || !upstream.body) {
-      const detail = (await upstream.text().catch(() => "")).trim();
-      throw upstreamError(
-        upstream.status,
-        detail
-          ? `Upstream returned ${upstream.status}: ${detail.slice(0, 300)}`
-          : `Upstream returned ${upstream.status} with no message.`,
-      );
-    }
+  const parsed = await collectUpstream(upstream.body);
+  rawContent = parsed.content;
+  citations = parsed.citations;
+  chatId = parsed.chatId;
+  if (chatId) await saveCachedChatId(c.env, cacheKey, chatId);
+  toolCall = toolsRequested
+    ? tryParseRelayToolCall(rawContent, body.tools)
+    : null;
 
-    const parsed = await collectUpstream(upstream.body);
-    rawContent = parsed.content;
-    citations = parsed.citations;
-    chatId = parsed.chatId ?? chatId;
-    if (chatId) {
-      body.user = chatId;
-      await saveCachedChatId(c.env, cacheKey, chatId);
-    }
-    toolCall = toolsRequested
-      ? tryParseRelayToolCall(rawContent, body.tools)
-      : null;
-
-    if (
-      !toolCall ||
-      !webSearchRequested ||
-      (toolCall.function.name !== "web_search" &&
-        toolCall.function.name !== "web_fetch") ||
-      step === MAX_HOSTED_TOOL_STEPS
-    ) {
-      break;
-    }
-
-    let args: Record<string, unknown> = {};
-    try {
-      const value: unknown = JSON.parse(toolCall.function.arguments);
-      if (value && typeof value === "object" && !Array.isArray(value)) {
-        args = value as Record<string, unknown>;
-      }
-    } catch {
-      // A malformed call receives an explicit tool error, then the model may recover.
-    }
-
-    let toolResult: unknown;
-    if (toolCall.function.name === "web_search") {
-      if (searches.length >= MAX_WEB_SEARCH_CALLS) {
-        toolResult = { error: "Search call limit reached for this response." };
-      } else {
-        const queryValue = args.query ?? args.search_query;
-        if (typeof queryValue !== "string" || !queryValue.trim()) {
-          toolResult = { error: "A non-empty search query is required." };
-        } else {
-          const query = sanitizeSearchQuery(queryValue);
-          const requestedCount = Number(args.max_results ?? args.num_results);
-          const count = Number.isFinite(requestedCount)
-            ? Math.min(MAX_SEARCH_RESULTS_PER_CALL, Math.max(1, Math.floor(requestedCount)))
-            : 5;
-          const results = await webSearch(query, {
-            url: c.env.CLOUDFLARE_SEARCH_URL,
-            token: c.env.CLOUDFLARE_SEARCH_TOKEN,
-            count,
-          });
-          searches.push({ query, results });
-          for (const result of results) fetchedPages.set(result.url, result);
-          toolResult = { query, count, results };
-        }
-      }
-    } else {
-      const url = typeof args.url === "string" ? args.url : "";
-      const fetched = await webFetchFromSearchResults(url, fetchedPages);
-      toolResult = fetched ?? {
-        error: "That URL was not returned by web_search. Search first and fetch a URL from those results.",
-      };
-    }
-
-    body.messages.push(
-      { role: "assistant", content: null, tool_calls: [toolCall] },
-      {
-        role: "tool",
-        name: toolCall.function.name,
-        content: JSON.stringify(toolResult),
-      },
+  // Some upstream model families return an empty completion instead of the
+  // requested tool-call envelope. If the client explicitly requested
+  // web_search, emit a valid delegated tool call using the latest user prompt
+  // so Agora/OpenAI clients can still execute the search themselves.
+  if (!toolCall && !rawContent.trim() && webSearchToolRequested) {
+    const latestUser = [...originalMessages]
+      .reverse()
+      .find((message) => message.role === "user");
+    const query = sanitizeSearchQuery(
+      typeof latestUser?.content === "string"
+        ? latestUser.content
+        : Array.isArray(latestUser?.content)
+          ? latestUser.content
+              .filter((part) => part.type === "text")
+              .map((part) => part.text)
+              .join(" ")
+          : "",
     );
+    if (query) {
+      rawContent = `TOOL_CALL: web_search\nARGUMENTS: ${JSON.stringify({ query, max_results: 5 })}`;
+      toolCall = tryParseRelayToolCall(rawContent, body.tools);
+    }
   }
 
   // Keep citations supplied by the upstream provider. Hosted search results

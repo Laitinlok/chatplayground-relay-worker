@@ -36,12 +36,25 @@ import {
   type WebSearchResult,
 } from "../utils/cloudflare-search-api";
 import { sanitizeSearchQuery } from "../utils/search-query";
+import { compactSearchToolResult } from "../utils/search-tool-context";
 
 const MAX_HOSTED_TOOL_STEPS = 8;
 const MAX_WEB_SEARCH_CALLS = 4;
 const MAX_SEARCH_RESULTS_PER_CALL = 50;
 
 const responses = new Hono<{ Bindings: Env; Variables: Variables }>();
+
+function latestUserQuery(messages: ResponsesRequest extends never ? never : import("../types/openai").OpenAIMessage[]): string {
+  const latest = [...messages].reverse().find((message) => message.role === "user");
+  if (typeof latest?.content === "string") return sanitizeSearchQuery(latest.content);
+  if (!Array.isArray(latest?.content)) return "";
+  return sanitizeSearchQuery(
+    latest.content
+      .filter((part) => part.type === "text")
+      .map((part) => part.text)
+      .join(" "),
+  );
+}
 
 function extractResponsesText(text: string): string {
   const dataLines = text
@@ -141,17 +154,22 @@ export function addHostedWebSearch(
 
   const textPart = message.content[0];
   if (!textPart) return { ...result, output: [search, ...result.output] };
-  const sourceLines = results.map(
-    (source, index) => `${index + 1}. ${source.title}`,
-  );
+  const sourceLines = results.map((source, index) => {
+    const title = source.title.replace(/[\\[\\]\\\\]/g, "\\\\$&");
+    const url = source.url.replace(/[()\\\\]/g, (character) =>
+      encodeURIComponent(character),
+    );
+    return `${index + 1}. [${title}](${url})`;
+  });
   const sourcePrefix = `${textPart.text ? "\n\n" : ""}Sources:\n`;
   let cursor = textPart.text.length + sourcePrefix.length;
   const annotations = results.map((source, index) => {
-    const title = sourceLines[index]!.slice(`${index + 1}. `.length);
+    const title = source.title;
+    const titleStart = cursor + `${index + 1}. [`.length;
     const annotation = {
       type: "url_citation",
-      start_index: cursor + `${index + 1}. `.length,
-      end_index: cursor + `${index + 1}. `.length + title.length,
+      start_index: titleStart,
+      end_index: titleStart + title.length,
       url: source.url,
       title,
     };
@@ -427,12 +445,35 @@ responses.post("/v1/responses", async (c) => {
       tool.function.name === "web_search" || tool.function.name === "web_fetch",
   );
   const toolsForModel = [...tools];
-  if (webSearchRequested && !toolsForModel.some((tool) => tool.function.name === "web_fetch")) {
+  if (
+    webSearchRequested &&
+    !toolsForModel.some((tool) => tool.function.name === "web_search")
+  ) {
+    toolsForModel.push({
+      type: "function",
+      function: {
+        name: "web_search",
+        description: "Search the web for current evidence using a focused query.",
+        parameters: {
+          type: "object",
+          properties: {
+            query: { type: "string" },
+            max_results: { type: "integer", minimum: 1, maximum: MAX_SEARCH_RESULTS_PER_CALL },
+          },
+          required: ["query"],
+        },
+      },
+    });
+  }
+  if (
+    webSearchRequested &&
+    !toolsForModel.some((tool) => tool.function.name === "web_fetch")
+  ) {
     toolsForModel.push({
       type: "function",
       function: {
         name: "web_fetch",
-        description: "Read full text for a URL returned by an earlier web_search call.",
+        description: "Read the result snippet for a URL returned by web_search.",
         parameters: {
           type: "object",
           properties: { url: { type: "string" } },
@@ -440,6 +481,24 @@ responses.post("/v1/responses", async (c) => {
         },
       },
     });
+  }
+  const searches: Array<{ query: string; results: WebSearchResult[] }> = [];
+  const fetchedPages = new Map<string, WebSearchResult>();
+  if (webSearchRequested) {
+    const query = latestUserQuery(request.messages);
+    if (query) {
+      const results = await webSearch(query, {
+        url: c.env.CLOUDFLARE_SEARCH_URL,
+        token: c.env.CLOUDFLARE_SEARCH_TOKEN,
+        count: 5,
+      });
+      searches.push({ query, results });
+      for (const result of results) fetchedPages.set(result.url, result);
+      request.messages.push({
+        role: "system",
+        content: `Initial web_search results for ${JSON.stringify(query)}:\n${JSON.stringify(results)}\nUse relevant result URLs with web_fetch if their snippets are insufficient. You may make a different focused web_search if evidence gaps remain.`,
+      });
+    }
   }
   const toolsRequested = toolsForModel.length > 0;
   if (toolsRequested) {
@@ -452,7 +511,7 @@ responses.post("/v1/responses", async (c) => {
       request.messages.push({
         role: "system",
         content:
-          "You have hosted web_search and web_fetch tools. You decide whether research is needed, how many focused searches to run, and the max_results for each (1–50). For distinct subquestions, issue separate searches. Inspect promising returned URLs with web_fetch when snippets are insufficient. After each tool result, decide whether more research is needed; stop and answer once evidence is sufficient. Do not repeat a query without a reason.",
+          "Research protocol: perform a minimum of one web_fetch on a relevant URL returned by web_search before producing the final answer. If the question has multiple facets, or the first search does not provide strong evidence, perform another web_search with a meaningfully different focused query and fetch at least one result from it. Do not stop after only the initial search when usable links are available.",
       });
     }
     request.messages = injectToolPrompt(
@@ -462,8 +521,6 @@ responses.post("/v1/responses", async (c) => {
     );
   }
 
-  const searches: Array<{ query: string; results: WebSearchResult[] }> = [];
-  const fetchedPages = new Map<string, WebSearchResult>();
   let rawContent = "";
   let citations: Awaited<ReturnType<typeof collectUpstream>>["citations"] = [];
   let toolCall: ReturnType<typeof tryParseRelayToolCall> = null;
@@ -564,7 +621,10 @@ responses.post("/v1/responses", async (c) => {
     request.messages.push({
       role: "tool",
       name: previousToolCall.function.name,
-      content: JSON.stringify(toolResult ?? { error: "Tool did not return a result." }),
+      content: compactSearchToolResult(
+        JSON.stringify(toolResult ?? { error: "Tool did not return a result." }),
+        previousToolCall.function.name,
+      ),
     });
   }
 

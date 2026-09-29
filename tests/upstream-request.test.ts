@@ -62,6 +62,38 @@ describe("buildUpstreamRequest — field mapping", () => {
     );
   });
 
+  it("preserves image_url content parts for upstream vision models", () => {
+    const image = {
+      type: "image_url" as const,
+      image_url: { url: "https://files.example.test/uploaded-photo.png" },
+    };
+    const { body } = buildUpstreamRequest(
+      {
+        model: "llama-4-scout",
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "Describe what this image means." },
+              image,
+            ],
+          },
+        ],
+      },
+      LMSYS_MODEL,
+    );
+
+    expect(body.messages).toEqual([
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "Describe what this image means." },
+          image,
+        ],
+      },
+    ]);
+  });
+
   it("serializes tool-call history using the injected text protocol", () => {
     const { body } = buildUpstreamRequest(
       {

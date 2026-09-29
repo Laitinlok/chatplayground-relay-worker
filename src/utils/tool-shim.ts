@@ -336,7 +336,7 @@ export function buildToolSystemPrompt(
     ...(tools.some((tool) => tool.function.name === "web_search")
       ? [
           "For web research, choose the search query and max_results needed for the question. Use multiple focused searches when they cover distinct subquestions or you need to verify key claims.",
-          "After search results arrive, use web_fetch on relevant returned URLs when snippets are insufficient. Continue searching or fetching if evidence gaps remain, then synthesize the sources into the final answer.",
+          "After each web_search result, call web_fetch on at least one relevant returned URL before answering; use more fetches for other promising sources. For multi-part questions or when the first results leave gaps, issue another focused web_search with a meaningfully different query, then fetch relevant links from those results. Continue until the evidence is sufficient, and only then answer. Do not stop after a single search when relevant links are available."
         ]
       : []),
     "If a tool is needed, emit the call immediately; do not preface it with statements such as 'I will search'.",

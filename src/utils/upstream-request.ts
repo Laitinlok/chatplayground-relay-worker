@@ -2,6 +2,7 @@ import type { UpstreamEndpoint } from "../constants/endpoints";
 import type { ModelEntry } from "../constants/models";
 import type { ChatCompletionRequest } from "../types/openai";
 import type { UpstreamChatRequest, UpstreamMessage } from "../types/upstream";
+import { compactSearchToolResult } from "./search-tool-context";
 
 const MAX_UPSTREAM_MESSAGE_CHARS = 15_000;
 
@@ -37,7 +38,7 @@ export function buildUpstreamRequest(
   const messages: UpstreamMessage[] = req.messages.flatMap((msg) => {
     const role = msg.role === "tool" ? "user" : msg.role;
 
-    let content: string;
+    let content: UpstreamMessage["content"];
     if (msg.role === "assistant" && msg.tool_calls?.length) {
       const calls = msg.tool_calls
         .map(
@@ -48,19 +49,26 @@ export function buildUpstreamRequest(
       const flat = flattenContent(msg.content).trim();
       content = flat.length > 0 ? flat : calls;
     } else if (msg.role === "tool") {
-      const result = flattenContent(msg.content).trim();
+      const result = compactSearchToolResult(
+        flattenContent(msg.content).trim(),
+        msg.name,
+      );
       content = `[Tool Result]\n${result || "(no result returned)"}\n\nUse this information to answer the user's original question in natural, conversational language. Do not just repeat the tool call or result verbatim.`;
     } else {
       const flat = flattenContent(msg.content);
       content =
-        flat.length > 0
-          ? flat
-          : typeof msg.content === "string"
-            ? msg.content
-            : "";
+        Array.isArray(msg.content) && msg.content.some((part) => part.type === "image_url")
+          ? msg.content
+          : flat.length > 0
+            ? flat
+            : typeof msg.content === "string"
+              ? msg.content
+              : "";
     }
 
-    return splitUpstreamMessage(role, content);
+    return typeof content === "string"
+      ? splitUpstreamMessage(role, content)
+      : [{ role, content }];
   });
 
   // Tool prompting via injectToolPrompt() (chat.ts) only covers "should I

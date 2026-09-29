@@ -36,6 +36,34 @@ describe("Responses adapter", () => {
     expect(request.tool_choice).toBe("required");
   });
 
+  it("preserves Responses image input for vision models", () => {
+    const request = responsesToChatRequest({
+      model: "llama-4-scout",
+      input: {
+        role: "user",
+        content: [
+          { type: "input_text", text: "Describe this image." },
+          {
+            type: "input_image",
+            image_url: "https://files.example.test/uploaded-photo.png",
+          },
+        ],
+      },
+    });
+
+    expect(request.messages).toEqual([
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "Describe this image." },
+          {
+            type: "image_url",
+            image_url: { url: "https://files.example.test/uploaded-photo.png" },
+          },
+        ],
+      },
+    ]);
+  });
   it("accepts a single OmniRoute input item object", () => {
     const request = responsesToChatRequest({
       model: "gpt-5.6",
@@ -194,7 +222,7 @@ describe("Responses adapter", () => {
       type: "message",
       content: [
         {
-          text: "Here is the answer.\n\nSources:\n1. Latest news",
+          text: "Here is the answer.\n\nSources:\n1. [Latest news](https://news.example/article)",
           annotations: [
             {
               type: "url_citation",
@@ -205,7 +233,9 @@ describe("Responses adapter", () => {
         },
       ],
     });
-    expect(result.output_text).toBe("Here is the answer.\n\nSources:\n1. Latest news");
+    expect(result.output_text).toBe(
+      "Here is the answer.\n\nSources:\n1. [Latest news](https://news.example/article)",
+    );
   });
 
   it("keeps sequence numbers contiguous for Responses clients", async () => {
