@@ -30,6 +30,7 @@ import {
   tryParseRelayToolCall,
 } from "../utils/tool-shim";
 import { sanitizeSearchQuery } from "../utils/search-query";
+import { resolveCitationTitles } from "../utils/citation-titles";
 
 const chat = new Hono<{ Bindings: Env; Variables: Variables }>();
 
@@ -164,7 +165,7 @@ chat.post("/v1/chat/completions", async (c) => {
     // which the relay executes and returns as a tool result. Do not pre-run
     // hosted search here, because that bypasses the tool-call exchange clients
     // such as Agora expect to see and misses the model's own focused query.
-    body.tool_choice = "auto";
+    body.tool_choice = body.tool_choice ?? "auto";
     body.messages.push({
       role: "system",
       content:
@@ -177,6 +178,7 @@ chat.post("/v1/chat/completions", async (c) => {
       body.messages,
       toolsForModel,
       body.tool_choice,
+      model.endpoint === "perplexity" ? "perplexity" : undefined,
     );
   }
 
@@ -269,12 +271,16 @@ chat.post("/v1/chat/completions", async (c) => {
           created,
           tools: body.tools,
           onChatId,
+          searchUrl: c.env.CLOUDFLARE_SEARCH_URL,
+          searchToken: c.env.CLOUDFLARE_SEARCH_TOKEN,
         })
       : streamUpstreamAsOpenAI(finalBody, {
           id,
           model: model.id,
           created,
           onChatId,
+          searchUrl: c.env.CLOUDFLARE_SEARCH_URL,
+          searchToken: c.env.CLOUDFLARE_SEARCH_TOKEN,
         });
     return new Response(sse, {
       status: 200,
@@ -313,11 +319,15 @@ chat.post("/v1/chat/completions", async (c) => {
       "Provider returned HTTP 200 but no text content.",
     );
   }
+  const citationTitles = await resolveCitationTitles(responseCitations, {
+    searchUrl: c.env.CLOUDFLARE_SEARCH_URL,
+    searchToken: c.env.CLOUDFLARE_SEARCH_TOKEN,
+  });
   const content =
     responseCitations.length === 0
       ? answerText
       : inlineCitationLinks(answerText, responseCitations) +
-        formatCitations(responseCitations);
+        formatCitations(responseCitations, citationTitles);
 
   const response: ChatCompletionResponse = {
     id,

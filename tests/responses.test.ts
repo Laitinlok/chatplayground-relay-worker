@@ -10,7 +10,11 @@ import {
   responsesToolsToChatTools,
   type ResponsesResponse,
 } from "../src/types/responses";
-import { addHostedWebSearch, streamResponse } from "../src/routes/responses";
+import {
+  addHostedWebSearch,
+  addPerplexityCitations,
+  streamResponse,
+} from "../src/routes/responses";
 
 describe("Responses adapter", () => {
   it("maps GPT-5.6-style input and function tools to chat shapes", () => {
@@ -155,9 +159,10 @@ describe("Responses adapter", () => {
       'event: response.created\ndata: {"type":"response.created","response":',
     );
     expect(body).toContain('event: response.completed\ndata: {"type":"response.completed","response":');
-    expect(body).toContain(
-      '"choices":[{"index":0,"delta":{"content":"hello"}}]',
-    );
+    expect(body).toContain("event: response.content_part.added");
+    expect(body).toContain("event: response.output_text.delta");
+    expect(body).toContain('"delta":"hello"');
+    expect(body).toContain('"text":"hello"');
     const payloads = body
       .split("\n")
       .filter((line) => line.startsWith("data: "))
@@ -222,7 +227,7 @@ describe("Responses adapter", () => {
       type: "message",
       content: [
         {
-          text: "Here is the answer.\n\nSources:\n1. [Latest news](https://news.example/article)",
+          text: "Here is the answer.",
           annotations: [
             {
               type: "url_citation",
@@ -233,9 +238,31 @@ describe("Responses adapter", () => {
         },
       ],
     });
-    expect(result.output_text).toBe(
-      "Here is the answer.\n\nSources:\n1. [Latest news](https://news.example/article)",
+    expect(result.output_text).toBe("Here is the answer.");
+  });
+
+  it("preserves Perplexity inline citations as Responses annotations", async () => {
+    const base = chatResultToResponses(
+      "perplexity-sonar",
+      "The result is current [1].",
+      null,
+      [{ role: "user", content: "question" }],
+      "resp_perplexity_citations",
     );
+    const result = await addPerplexityCitations(base, ["https://source.example"]);
+    const part = (result.output[0] as any).content[0];
+
+    expect(result.output_text).toBe("The result is current [1].");
+    expect(part.text).toBe("The result is current [1].");
+    expect(part.annotations).toEqual([
+      {
+        type: "url_citation",
+        start_index: 22,
+        end_index: 25,
+        url: "https://source.example",
+        title: "source.example",
+      },
+    ]);
   });
 
   it("keeps sequence numbers contiguous for Responses clients", async () => {
@@ -267,6 +294,17 @@ describe("Responses adapter", () => {
     const second = injectToolPrompt(first, tool);
     expect(second).toEqual(first);
     expect(buildToolSystemPrompt(tool)).toContain("[relay-tool-prompt-v1]");
+  });
+
+  it("adds the Perplexity dispatch protocol for Responses tools", () => {
+    const prompt = buildToolSystemPrompt(
+      [{ type: "function", function: { name: "edit_file" } }],
+      "required",
+      "perplexity",
+    );
+    expect(prompt).toContain("Perplexity compatibility mode is active");
+    expect(prompt).toContain("exactly one call in the required TOOL_CALL format");
+    expect(prompt).toContain("You must call exactly one tool");
   });
 
   it("maps OpenAI web search tools into the relay search tool", () => {

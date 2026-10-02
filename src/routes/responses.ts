@@ -20,8 +20,6 @@ import {
 } from "../utils/upstream-request";
 import {
   collectUpstream,
-  formatCitations,
-  inlineCitationLinks,
   splitReasoningContent,
 } from "../utils/upstream-stream";
 import {
@@ -32,29 +30,17 @@ import {
 import {
   webSearch,
   webFetchFromSearchResults,
-  formatWebSearchContext,
   type WebSearchResult,
 } from "../utils/cloudflare-search-api";
 import { sanitizeSearchQuery } from "../utils/search-query";
 import { compactSearchToolResult } from "../utils/search-tool-context";
+import { resolveCitationTitles } from "../utils/citation-titles";
 
 const MAX_HOSTED_TOOL_STEPS = 8;
 const MAX_WEB_SEARCH_CALLS = 4;
 const MAX_SEARCH_RESULTS_PER_CALL = 50;
 
 const responses = new Hono<{ Bindings: Env; Variables: Variables }>();
-
-function latestUserQuery(messages: ResponsesRequest extends never ? never : import("../types/openai").OpenAIMessage[]): string {
-  const latest = [...messages].reverse().find((message) => message.role === "user");
-  if (typeof latest?.content === "string") return sanitizeSearchQuery(latest.content);
-  if (!Array.isArray(latest?.content)) return "";
-  return sanitizeSearchQuery(
-    latest.content
-      .filter((part) => part.type === "text")
-      .map((part) => part.text)
-      .join(" "),
-  );
-}
 
 function extractResponsesText(text: string): string {
   const dataLines = text
@@ -135,6 +121,60 @@ export function addHostedWebSearches(
   return { ...enriched, output };
 }
 
+function citationTitle(url: string): string {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    return url;
+  }
+}
+
+export async function addPerplexityCitations(
+  result: ResponsesResponse,
+  citations: readonly string[],
+  options: { searchUrl?: string; searchToken?: string } = {},
+): Promise<ResponsesResponse> {
+  if (citations.length === 0) return result;
+  const message = result.output.find((item) => item.type === "message");
+  if (!message || !message.content[0]) return result;
+
+  const titles = await resolveCitationTitles(citations, options);
+  const textPart = message.content[0];
+  const annotations: unknown[] = [...textPart.annotations];
+  const marker = /\[(\d+)\]/g;
+  let match: RegExpExecArray | null;
+  let text = "";
+  let cursor = 0;
+  while ((match = marker.exec(textPart.text)) !== null) {
+    const index = Number(match[1]);
+    const url = citations[index - 1];
+    if (!url) continue;
+    text += textPart.text.slice(cursor, match.index);
+    const markerStart = text.length;
+    text += match[0];
+    annotations.push({
+      type: "url_citation",
+      start_index: markerStart,
+      end_index: markerStart + match[0].length,
+      url,
+      title: titles.get(url) ?? citationTitle(url),
+    });
+    cursor = match.index + match[0].length;
+  }
+  text += textPart.text.slice(cursor);
+
+  const updatedMessage = {
+    ...message,
+    content: [{ ...textPart, text, annotations }],
+  };
+  return {
+    ...result,
+    output: result.output.map((item) =>
+      item === message ? updatedMessage : item,
+    ),
+    output_text: text,
+  };
+}
 export function addHostedWebSearch(
   result: ResponsesResponse,
   query: string,
@@ -154,36 +194,48 @@ export function addHostedWebSearch(
 
   const textPart = message.content[0];
   if (!textPart) return { ...result, output: [search, ...result.output] };
-  const sourceLines = results.map((source, index) => {
-    const title = source.title.replace(/[\\[\\]\\\\]/g, "\\\\$&");
-    const url = source.url.replace(/[()\\\\]/g, (character) =>
-      encodeURIComponent(character),
-    );
-    return `${index + 1}. [${title}](${url})`;
-  });
-  const sourcePrefix = `${textPart.text ? "\n\n" : ""}Sources:\n`;
-  let cursor = textPart.text.length + sourcePrefix.length;
-  const annotations = results.map((source, index) => {
-    const title = source.title;
-    const titleStart = cursor + `${index + 1}. [`.length;
-    const annotation = {
+  const annotations: unknown[] = [...textPart.annotations];
+  const marker = /\[(\d+)\]/g;
+  let match: RegExpExecArray | null;
+  let text = "";
+  let cursor = 0;
+  while ((match = marker.exec(textPart.text)) !== null) {
+    const index = Number(match[1]);
+    const source = results[index - 1];
+    if (!source) continue;
+    text += textPart.text.slice(cursor, match.index);
+    const markerStart = text.length;
+    text += match[0];
+    annotations.push({
       type: "url_citation",
-      start_index: titleStart,
-      end_index: titleStart + title.length,
+      start_index: markerStart,
+      end_index: markerStart + match[0].length,
       url: source.url,
-      title,
-    };
-    cursor += sourceLines[index]!.length + 1;
-    return annotation;
-  });
-  const sourceText = `${sourcePrefix}${sourceLines.join("\n")}`;
+      title: source.title,
+    });
+    cursor = match.index + match[0].length;
+  }
+  text += textPart.text.slice(cursor);
+
+  if (annotations.length === textPart.annotations.length && results.length > 0) {
+    for (const source of results) {
+      annotations.push({
+        type: "url_citation",
+        start_index: 0,
+        end_index: text.length,
+        url: source.url,
+        title: source.title,
+      });
+    }
+  }
+
   const updatedMessage = {
     ...message,
     content: [
       {
         ...textPart,
-        text: `${textPart.text}${sourceText}`,
-        annotations: [...textPart.annotations, ...annotations],
+        text,
+        annotations,
       },
     ],
   };
@@ -193,10 +245,9 @@ export function addHostedWebSearch(
   return {
     ...result,
     output: [search, ...output],
-    output_text: `${result.output_text}${sourceText}`,
+    output_text: text,
   };
 }
-
 function event(
   type: string,
   data: Record<string, unknown>,
@@ -347,11 +398,11 @@ export function streamResponse(
               item_id: output.id,
               output_index: outputIndex,
               content_index: 0,
-              part,
+              part: { ...part, text: "" },
             }),
           ),
         );
-        if (text)
+        if (text) {
           controller.enqueue(
             encoder.encode(
               send("response.output_text.delta", {
@@ -360,12 +411,25 @@ export function streamResponse(
                 output_index: outputIndex,
                 content_index: 0,
                 delta: text,
-                // Compatibility for older OmniRoute streamed health checks,
-                // which extract only Chat Completions choices[].delta.content.
-                choices: [{ index: 0, delta: { content: text } }],
               }),
             ),
           );
+        }
+        for (const [annotationIndex, annotation] of part.annotations.entries()) {
+          controller.enqueue(
+            encoder.encode(
+              send("response.output_text.annotation.added", {
+                type: "response.output_text.annotation.added",
+                item_id: output.id,
+                output_index: outputIndex,
+                content_index: 0,
+                annotation_index: annotationIndex,
+                annotation,
+              }),
+            ),
+          );
+        }
+
         controller.enqueue(
           encoder.encode(
             send("response.output_text.done", {
@@ -484,40 +548,18 @@ responses.post("/v1/responses", async (c) => {
   }
   const searches: Array<{ query: string; results: WebSearchResult[] }> = [];
   const fetchedPages = new Map<string, WebSearchResult>();
-  if (webSearchRequested) {
-    const query = latestUserQuery(request.messages);
-    if (query) {
-      const results = await webSearch(query, {
-        url: c.env.CLOUDFLARE_SEARCH_URL,
-        token: c.env.CLOUDFLARE_SEARCH_TOKEN,
-        count: 5,
-      });
-      searches.push({ query, results });
-      for (const result of results) fetchedPages.set(result.url, result);
-      request.messages.push({
-        role: "system",
-        content: `Initial web_search results for ${JSON.stringify(query)}:\n${JSON.stringify(results)}\nUse relevant result URLs with web_fetch if their snippets are insufficient. You may make a different focused web_search if evidence gaps remain.`,
-      });
-    }
-  }
   const toolsRequested = toolsForModel.length > 0;
   if (toolsRequested) {
-    // The relay executes hosted search/fetch calls between upstream turns. Keep
-    // the model in auto mode so a client-side `required` choice cannot force a
-    // new tool call on every internal turn instead of letting it finish.
+    // Search is model-directed: do not call the search service merely because
+    // the request advertises a web-search tool. Execute it only after the
+    // model emits a parsed web_search call below.
     if (webSearchRequested) request.tool_choice = "auto";
     request.tools = toolsForModel;
-    if (webSearchRequested) {
-      request.messages.push({
-        role: "system",
-        content:
-          "Research protocol: perform a minimum of one web_fetch on a relevant URL returned by web_search before producing the final answer. If the question has multiple facets, or the first search does not provide strong evidence, perform another web_search with a meaningfully different focused query and fetch at least one result from it. Do not stop after only the initial search when usable links are available.",
-      });
-    }
     request.messages = injectToolPrompt(
       request.messages,
       toolsForModel,
       webSearchRequested ? "auto" : request.tool_choice,
+      model.endpoint === "perplexity" ? "perplexity" : undefined,
     );
   }
 
@@ -636,11 +678,7 @@ responses.post("/v1/responses", async (c) => {
   if (!visibleContent.trim() && !toolCall) {
     throw upstreamError(200, "Provider returned HTTP 200 but no text content.");
   }
-  const content = toolCall
-    ? ""
-    : citations.length
-      ? inlineCitationLinks(visibleContent, citations) + formatCitations(citations)
-      : visibleContent;
+  const content = toolCall ? "" : visibleContent;
   const baseResult = chatResultToResponses(
     model.id,
     content,
@@ -649,9 +687,15 @@ responses.post("/v1/responses", async (c) => {
     undefined,
     split.reasoningContent,
   );
-  const result = searches.length
-    ? addHostedWebSearches(baseResult, searches)
+  const resultWithCitations = citations.length
+    ? await addPerplexityCitations(baseResult, citations, {
+        searchUrl: c.env.CLOUDFLARE_SEARCH_URL,
+        searchToken: c.env.CLOUDFLARE_SEARCH_TOKEN,
+      })
     : baseResult;
+  const result = searches.length
+    ? addHostedWebSearches(resultWithCitations, searches)
+    : resultWithCitations;
   console.log("RESPONSES RESULT", {
     model: model.id,
     stream: Boolean(raw.stream),

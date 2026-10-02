@@ -179,10 +179,22 @@ describe("tryParseRelayToolCall", () => {
     expect(prompt).toContain("complete, self-contained final answer");
     expect(prompt).toContain("emit the call immediately");
   });
-  it("parses the first call once when the model duplicates the payload", () => {
-    const payload =
-      '{"relay_tool_call":{"name":"cron","arguments":{"action":"add"}}}';
-    const call = tryParseRelayToolCall(`${payload}${payload}`, tools);
+  it("adds a strict dispatch protocol for Perplexity models", () => {
+    const prompt = buildToolSystemPrompt(
+      [{ type: "function", function: { name: "edit_file" } }],
+      "auto",
+      "perplexity",
+    );
+    expect(prompt).toContain("Perplexity compatibility mode is active");
+    expect(prompt).toContain("do not answer, browse, cite sources");
+    expect(prompt).toContain("exactly one call in the required TOOL_CALL format");
+  });
+
+  it("parses Perplexity's tagged tool-call dialect", () => {
+    const call = tryParseRelayToolCall(
+      '<|tool_call|>{"name":"cron","arguments":{"action":"add"}}<|/tool_call|>',
+      tools,
+    );
     expect(call?.function.name).toBe("cron");
     expect(call?.function.arguments).toBe('{"action":"add"}');
   });

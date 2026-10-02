@@ -7,6 +7,7 @@ import {
   type OpenAITool,
   type ShimToolCall,
 } from "./tool-shim";
+import { resolveCitationTitles, type CitationTitleMap } from "./citation-titles";
 
 // chatplayground appends `CHAT_ID:<cuid>` at the very end of the stream as a
 // sentinel. CUID format: `c` + ≥20 chars of [a-z0-9]. We strip it before
@@ -85,13 +86,34 @@ function safeParseStringArray(json: string): readonly string[] | null {
   }
 }
 
+/** Return a readable label for a citation URL when no title metadata is available. */
+function citationTitle(url: string): string {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    return url;
+  }
+}
+
 /** Markdown sources block appended at the end of an assistant message. */
-export function formatCitations(citations: readonly string[]): string {
+export function formatCitations(
+  citations: readonly string[],
+  titles?: CitationTitleMap,
+): string {
   if (citations.length === 0) return "";
-  // Wrap each URL as a Markdown link so renderers that don't autolink bare
-  // URLs still produce a clickable Sources list. Visible text stays the URL.
-  const lines = citations.map((url, i) => `${i + 1}. [${url}](${url})`);
+  const lines = citations.map((url, i) => {
+    const title = (titles?.get(url) ?? citationTitle(url)).replace(/[\\[\\]\\]/g, "\\\\$&");
+    const safeUrl = url.replace(/[()\\]/g, (character) => encodeURIComponent(character));
+    return `${i + 1}. [${title}](${safeUrl})`;
+  });
   return `\n\n---\n**Sources**\n\n${lines.join("\n")}`;
+}
+
+export async function formatCitationsWithTitles(
+  citations: readonly string[],
+  options?: { searchUrl?: string; searchToken?: string },
+): Promise<string> {
+  return formatCitations(citations, await resolveCitationTitles(citations, options));
 }
 
 const INLINE_CITATION_RE = /\[(\d+)\]/g;
@@ -109,8 +131,9 @@ export function inlineCitationLinks(
   return text.replace(INLINE_CITATION_RE, (match, idxStr: string) => {
     const idx = Number(idxStr);
     const url = citations[idx - 1];
-    if (!url) return match; // unknown index — leave the literal marker
-    return `[\\[${idx}\\]](${url})`;
+    if (!url) return match;
+    const safeUrl = url.replace(/[()\\]/g, (character) => encodeURIComponent(character));
+    return `[\\[${idx}\\]](${safeUrl})`;
   });
 }
 
@@ -184,6 +207,8 @@ interface ChunkMeta {
   created: number;
   tools?: OpenAITool[];
   onChatId?: (chatId: string) => void;
+  searchUrl?: string;
+  searchToken?: string;
 }
 
 /**
@@ -297,7 +322,11 @@ export function streamUpstreamAsOpenAI(
           );
         }
         const visibleContent = split.content || split.reasoningContent;
-        const answer = visibleContent + formatCitations(citations);
+        const titles = await resolveCitationTitles(citations, {
+          searchUrl: meta.searchUrl,
+          searchToken: meta.searchToken,
+        });
+        const answer = visibleContent + formatCitations(citations, titles);
         if (answer) controller.enqueue(sse({ content: answer }));
 
         controller.enqueue(sse({}, "stop"));
@@ -316,6 +345,8 @@ interface ToolAwareChunkMeta {
   created: number;
   tools?: OpenAITool[];
   onChatId?: (chatId: string) => void;
+  searchUrl?: string;
+  searchToken?: string;
 }
 
 /**
@@ -387,7 +418,11 @@ export function streamUpstreamWithToolShim(
             );
           }
           const visibleContent = split.content || split.reasoningContent;
-          const answer = visibleContent + formatCitations(citations);
+          const titles = await resolveCitationTitles(citations, {
+          searchUrl: meta.searchUrl,
+          searchToken: meta.searchToken,
+        });
+        const answer = visibleContent + formatCitations(citations, titles);
           if (answer) controller.enqueue(sse({ content: answer }));
           controller.enqueue(sse({}, "stop"));
         }

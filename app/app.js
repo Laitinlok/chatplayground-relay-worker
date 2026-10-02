@@ -221,6 +221,14 @@ function renderText(value) {
   html = html.replace(/```([\s\S]*?)```/g, '<pre><code>$1</code></pre>');
   html = html.replace(/^### (.*)$/gm, '<h4>$1</h4>').replace(/^## (.*)$/gm, '<h3>$1</h3>').replace(/^# (.*)$/gm, '<h2>$1</h2>');
   html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>').replace(/\*(.+?)\*/g, '<em>$1</em>');
+  const references = new Map();
+  html = html.replace(/^\[(\d+)\]: (https?:\/\/\S+)$/gm, (_match, index, url) => {
+    references.set(index, url);
+    return "";
+  });
+  html = html.replace(/\[([^\]]+)\]\[([0-9]+)\]/g, (_match, label, index) => `<a href="${references.get(index) || "#"}" target="_blank" rel="noreferrer">${label}</a>`);
+  html = html.replace(/\[\\\[(\d+)\\\]\]\((https?:\/\/[^)]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">[$1]</a>');
+  html = html.replace(/\[\[(\d+)\]\]\((https?:\/\/[^)]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">[$1]</a>');
   html = html.replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>');
   html = html.replace(/^(?:- |• )(.*)$/gm, '<li>$1</li>').replace(/(?:<li>.*<\/li>\n?)+/g, (list) => `<ul>${list}</ul>`);
   return html;

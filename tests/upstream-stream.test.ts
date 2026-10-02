@@ -185,9 +185,9 @@ describe("formatCitations", () => {
     const out = formatCitations(URLS);
     expect(out).toBe(
       "\n\n---\n**Sources**\n\n" +
-        "1. [https://example.com/1](https://example.com/1)\n" +
-        "2. [https://example.com/2](https://example.com/2)\n" +
-        "3. [https://example.com/3](https://example.com/3)",
+        "1. [example.com](https://example.com/1)\n" +
+        "2. [example.com](https://example.com/2)\n" +
+        "3. [example.com](https://example.com/3)",
     );
   });
 });

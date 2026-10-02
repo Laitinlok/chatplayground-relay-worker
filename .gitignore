@@ -11,3 +11,5 @@ tests/fixtures/bundle.js
 .clerk-id
 
 wrangler.jsonc
+# Added by code-review-graph
+.code-review-graph/

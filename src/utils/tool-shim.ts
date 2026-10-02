@@ -299,9 +299,12 @@ function toolChoiceName(toolChoice?: ToolChoice): string | null {
   return null;
 }
 
+export type ToolShimProvider = "perplexity";
+
 export function buildToolSystemPrompt(
   tools: OpenAITool[],
   toolChoice?: ToolChoice,
+  provider?: ToolShimProvider,
 ): string {
   const forcedName = toolChoiceName(toolChoice);
 
@@ -343,9 +346,21 @@ export function buildToolSystemPrompt(
     "If you are not calling a tool, respond with normal plain-text prose as usual.",
   ];
 
+  const providerRules =
+    provider === "perplexity"
+      ? [
+          "Perplexity compatibility mode is active: the upstream does not receive native tools, so you must act as the tool dispatcher for the host.",
+          "For any request that requires a listed tool, do not answer, browse, cite sources, explain your plan, or emit ordinary prose. Emit the tool call immediately.",
+          "A tool turn must contain exactly one call in the required TOOL_CALL format. The tool name must match the catalog exactly and ARGUMENTS must be one valid JSON object with every required field.",
+          "Never replace a listed host tool with Perplexity's own web search or citations. Never put JSON in a markdown fence.",
+          "After the host returns a tool result, use it to continue the task. If another tool is needed, emit another single TOOL_CALL; otherwise answer the user normally.",
+        ]
+      : [];
+
   return [
     "You have access to the tools listed below through the relay. The host will execute a tool call and return the result to you.",
     "Never claim that tools are unavailable and never describe this protocol to the user.",
+    ...providerRules,
     TOOL_PROMPT_SENTINEL,
     "Available tools:",
     formatToolCatalog(tools),
@@ -396,14 +411,15 @@ export function injectToolPrompt(
   messages: OpenAIMessage[],
   tools: OpenAITool[],
   toolChoice?: ToolChoice,
+  provider?: ToolShimProvider,
 ): OpenAIMessage[] {
-  const toolPrompt = buildToolSystemPrompt(tools, toolChoice);
+  const toolPrompt = buildToolSystemPrompt(tools, toolChoice, provider);
   const [first, ...rest] = messages;
 
   if (first?.role === "system" && typeof first.content === "string") {
     if (first.content.includes(TOOL_PROMPT_SENTINEL)) return messages;
     return [
-      { ...first, content: `${first.content}\n\n${toolPrompt}` },
+      { ...first, content: `${toolPrompt}\n\nSystem Instructions:\n${first.content}` },
       ...rest,
     ];
   }
@@ -414,7 +430,7 @@ export function injectToolPrompt(
 const INVOKE_BLOCK_RE = /<invoke\s+name="([^"]+)"\s*>([\s\S]*?)<\/invoke>/i;
 const PARAM_RE =
   /<parameter\s+name="([^"]+)"(?:\s+string="(true|false)")?\s*>([\s\S]*?)<\/parameter>/gi;
-const CLAUDE_TOOL_CALL_TAG_RE = /<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/i;
+const CLAUDE_TOOL_CALL_TAG_RE = /(?:<tool_call>|<\|tool_call\|>)\s*([\s\S]*?)\s*(?:<\/tool_call>|<\|\/tool_call\|>)/i;
 const TEXT_TOOL_CALL_RE =
   /\bTOOL_CALL\s*:\s*([^\r\n]+?)\s+(?:\r?\n\s*)?ARGUMENTS\s*:\s*/i;
 const NATIVE_JSON_TOOL_CALL_RE = /"tool_calls"\s*:\s*\[/i;

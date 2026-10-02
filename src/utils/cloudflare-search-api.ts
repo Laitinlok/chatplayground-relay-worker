@@ -179,7 +179,13 @@ export async function webSearch(
   return [];
 }
 
-/** The configured Cloudflare Search API exposes search results, not extraction. */
+const JINA_FETCH_TIMEOUT_MS = 6_000;
+const MAX_JINA_FETCH_BYTES = 64 * 1024;
+
+/**
+ * Fetch the full text for a search result using Jina Reader (r.jina.ai).
+ * Falls back to the cached snippet if extraction fails or times out.
+ */
 export async function webFetchFromSearchResults(
   url: string,
   results: ReadonlyMap<string, WebSearchResult>,
@@ -194,6 +200,42 @@ export async function webFetchFromSearchResults(
   }
   const result = results.get(normalizedUrl);
   if (!result) return null;
+
+  try {
+    const response = await fetch(`https://r.jina.ai/${normalizedUrl}`, {
+      headers: {
+        accept: "text/plain",
+        "x-respond-with": "text",
+      },
+      signal: AbortSignal.timeout(JINA_FETCH_TIMEOUT_MS),
+    });
+    if (response.ok && response.body) {
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let text = "";
+      let bytes = 0;
+      try {
+        while (bytes < MAX_JINA_FETCH_BYTES) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          const chunk = value.subarray(0, MAX_JINA_FETCH_BYTES - bytes);
+          bytes += chunk.byteLength;
+          text += decoder.decode(chunk, { stream: true });
+          if (chunk.byteLength < value.byteLength) break;
+        }
+      } finally {
+        await reader.cancel().catch(() => {});
+      }
+      text += decoder.decode();
+      const cleanText = text.trim();
+      if (cleanText.length > 0) {
+        return { title: result.title, url: result.url, text: cleanText };
+      }
+    }
+  } catch {
+    // Fall back to snippet below
+  }
+
   return { title: result.title, url: result.url, text: result.snippet };
 }
 

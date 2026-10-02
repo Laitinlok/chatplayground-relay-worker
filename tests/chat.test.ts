@@ -263,7 +263,7 @@ describe("POST /v1/chat/completions — non-streaming", () => {
 
     expect(body.choices[0]?.message.content).toBe(
       "Paris [\\[1\\]](https://a.test) is nice." +
-        "\n\n---\n**Sources**\n\n1. [https://a.test](https://a.test)",
+        "\n\n---\n**Sources**\n\n1. [a.test](https://a.test)",
     );
     // 18 raw chars → 5. The relay-added links must not inflate this.
     expect(body.usage.completion_tokens).toBe(5);
@@ -325,7 +325,39 @@ describe("POST /v1/chat/completions — upstream request", () => {
       noSave: false,
     });
   });
+  it("uses the Perplexity dispatch prompt and preserves required tool choice", async () => {
+    upstream(() => new Response(`ok${CHAT_ID}`));
+    await post({
+      model: "perplexity-sonar",
+      messages: [{ role: "user", content: "Edit the file" }],
+      tools: [
+        {
+          type: "function",
+          function: {
+            name: "edit_file",
+            description: "Edit a project file",
+            parameters: {
+              type: "object",
+              properties: { path: { type: "string" } },
+              required: ["path"],
+            },
+          },
+        },
+      ],
+      tool_choice: "required",
+    });
+
+    const request = JSON.parse(String(chatCall()[1].body));
+    expect(request.tool_choice).toBeUndefined();
+    expect(request.messages[0].content).toContain(
+      "Perplexity compatibility mode is active",
+    );
+    expect(request.messages[0].content).toContain(
+      "exactly one call in the required TOOL_CALL format",
+    );
+  });
 });
+
 
 describe("POST /v1/chat/completions — streaming", () => {
   /** Every `data:` payload of an SSE response, `[DONE]` included. */
@@ -375,7 +407,7 @@ describe("POST /v1/chat/completions — streaming", () => {
 
     // The streaming path can only append — [1] stays a literal marker.
     expect(text).toBe(
-      "See [1].\n\n---\n**Sources**\n\n1. [https://a.test](https://a.test)",
+      "See [1].\n\n---\n**Sources**\n\n1. [a.test](https://a.test)",
     );
   });
 });
