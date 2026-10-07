@@ -36,6 +36,8 @@ export interface Env {
   MODEL_CACHE?: KVNamespace;
   // Chat-session cache (optional — enables upstream chat continuity).
   CHAT_CACHE?: KVNamespace;
+  // Cloudflare Workers AI binding for embeddings & AI models.
+  AI?: any;
   // D1 database for hashed relay API keys.
   DB?: D1Database;
 }

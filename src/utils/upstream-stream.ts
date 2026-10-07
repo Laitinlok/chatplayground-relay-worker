@@ -326,7 +326,12 @@ export function streamUpstreamAsOpenAI(
           searchUrl: meta.searchUrl,
           searchToken: meta.searchToken,
         });
-        const answer = visibleContent + formatCitations(citations, titles);
+        const answer =
+          (split.reasoningContent && split.content
+            ? `<think>\n${split.reasoningContent}\n</think>\n`
+            : "") +
+          visibleContent +
+          formatCitations(citations, titles);
         if (answer) controller.enqueue(sse({ content: answer }));
 
         controller.enqueue(sse({}, "stop"));
@@ -395,9 +400,11 @@ export function streamUpstreamWithToolShim(
         const toolCall = tryParseRelayToolCall(content, meta.tools);
 
         if (toolCall) {
+          // Role + empty content first, then tool_calls, then finish_reason.
+          // Agora retries when the tool-call envelope looks incomplete.
+          controller.enqueue(sse({ role: "assistant", content: "" }));
           controller.enqueue(
             sse({
-              role: "assistant",
               tool_calls: [
                 {
                   index: 0,
@@ -422,7 +429,12 @@ export function streamUpstreamWithToolShim(
           searchUrl: meta.searchUrl,
           searchToken: meta.searchToken,
         });
-        const answer = visibleContent + formatCitations(citations, titles);
+        const answer =
+          (split.reasoningContent && split.content
+            ? `<think>\n${split.reasoningContent}\n</think>\n`
+            : "") +
+          visibleContent +
+          formatCitations(citations, titles);
           if (answer) controller.enqueue(sse({ content: answer }));
           controller.enqueue(sse({}, "stop"));
         }

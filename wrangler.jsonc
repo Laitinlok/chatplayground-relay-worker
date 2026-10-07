@@ -36,6 +36,10 @@
     { "binding": "CHAT_CACHE", "id": "cf3316e58983412e8ccf54eeb7ac5204" }
   ],
 
+  "ai": {
+    "binding": "AI"
+  },
+
   // Multi-key management — create with: wrangler d1 create chatplayground-relay-keys
   "d1_databases": [
     {

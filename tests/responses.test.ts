@@ -302,9 +302,9 @@ describe("Responses adapter", () => {
       "required",
       "perplexity",
     );
-    expect(prompt).toContain("Perplexity compatibility mode is active");
-    expect(prompt).toContain("exactly one call in the required TOOL_CALL format");
-    expect(prompt).toContain("You must call exactly one tool");
+    expect(prompt).toContain("<TOOL_CALL>");
+    expect(prompt).toContain("You must call exactly one listed tool.");
+    expect(prompt).toContain("edit_file");
   });
 
   it("maps OpenAI web search tools into the relay search tool", () => {
@@ -330,5 +330,37 @@ describe("Responses adapter", () => {
         { type: "function", function: { name: "cron" } },
       ]),
     ).toEqual([{ type: "function", function: { name: "cron" } }]);
+  });
+
+  it("emits reasoning as its own output item before the message", () => {
+    const result = chatResultToResponses(
+      "m",
+      "answer",
+      null,
+      [{ role: "user", content: "hi" }],
+      "resp_r",
+      "step one",
+    );
+    expect(result.output[0]).toMatchObject({
+      type: "reasoning",
+      content: [{ type: "reasoning_text", text: "step one" }],
+    });
+    expect(result.output[1]).toMatchObject({ type: "message" });
+    expect(result.output_text).toBe("answer");
+  });
+
+  it("streams the reasoning item", async () => {
+    const result = chatResultToResponses(
+      "m",
+      "answer",
+      null,
+      [{ role: "user", content: "hi" }],
+      "resp_r",
+      "step one",
+    );
+    const body = await new Response(streamResponse(result, null)).text();
+    expect(body).toContain("event: response.output_item.added");
+    expect(body).toContain('"type":"reasoning"');
+    expect(body).toContain("step one");
   });
 });

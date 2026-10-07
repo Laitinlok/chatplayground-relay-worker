@@ -43,17 +43,17 @@ export function buildUpstreamRequest(
       const calls = msg.tool_calls
         .map(
           (tc) =>
-            `TOOL_CALL: ${tc.function.name}\nARGUMENTS: ${tc.function.arguments}`,
+            `<TOOL_CALL>\ntool: ${tc.function.name}\nparams:\n${tc.function.arguments}\n</TOOL_CALL>`,
         )
         .join("\n\n");
       const flat = flattenContent(msg.content).trim();
-      content = flat.length > 0 ? flat : calls;
+      content = [flat, calls].filter(Boolean).join("\n");
     } else if (msg.role === "tool") {
       const result = compactSearchToolResult(
         flattenContent(msg.content).trim(),
         msg.name,
       );
-      content = `[Tool Result]\n${result || "(no result returned)"}\n\nUse this information to answer the user's original question in natural, conversational language. Do not just repeat the tool call or result verbatim.`;
+      content = `<TOOL_RESULT>\n${result || "(no result returned)"}\n</TOOL_RESULT>\nAnswer the user's question from this result. Do not call the tool again and do not say you will check.`;
     } else {
       const flat = flattenContent(msg.content);
       content =
@@ -71,6 +71,38 @@ export function buildUpstreamRequest(
       : [{ role, content }];
   });
 
+  // chatplayground has no assistant prefill and no reasoning tags. A trailing
+  // assistant draft, or a <think>/<tool_selection> block, is echoed or rejected
+  // instead of producing a tool call. Move that text into the last user turn.
+  const prepared: UpstreamMessage[] = [];
+  for (const message of messages) {
+    if (message.role !== "assistant" || typeof message.content !== "string") {
+      prepared.push(message);
+      continue;
+    }
+    // Keep tool-call history as-is. Only fold free-form drafts that would
+    // otherwise leave the request ending on an assistant turn.
+    if (/<TOOL_CALL>/i.test(message.content)) {
+      prepared.push(message);
+      continue;
+    }
+    const plain = message.content
+      .replace(/<\/?think>/gi, "")
+      .replace(/<\/?tool_selection>/gi, "")
+      .replace(/\*\*ANSWER\*\*/g, "")
+      .trim();
+    if (!plain) continue;
+    const previous = prepared.at(-1);
+    const note = `Draft so far (do not repeat it):\n${plain}`;
+    if (previous && previous.role === "user" && typeof previous.content === "string") {
+      previous.content = `${previous.content}\n\n${note}`;
+    } else {
+      prepared.push({ role: "user", content: note });
+    }
+  }
+  messages.length = 0;
+  messages.push(...prepared);
+
   // Tool prompting via injectToolPrompt() (chat.ts) only covers "should I
   // call a tool," not "I already have a tool result, now answer." Models
   // observed mimicking the injected "I called X tool with arguments Y"
@@ -82,12 +114,34 @@ export function buildUpstreamRequest(
   const hasToolResultInHistory = req.messages.some((m) => m.role === "tool");
   if (hasToolResultInHistory) {
     const canCallAnotherTool = req.tools && req.tools.length > 0;
+    const listed = (req.tools ?? []).map((tool) => tool.function.name);
+    const hasEditTool = listed.some((name) =>
+      /edit|replace|write|create|apply|patch|file/i.test(name),
+    );
     messages.push({
       role: "system",
       content: canCallAnotherTool
-        ? "Tool results are present above. Use them to answer the user's original question. Do not repeat a completed TOOL_CALL or its arguments. If another step is necessary, emit one new TOOL_CALL using the required JSON arguments; otherwise answer directly."
-        : "A tool result is present above. Use it to answer the user's original question directly. Do not emit another TOOL_CALL, invent a tool, repeat the tool call, or output a sources list. Cite the supplied evidence in the answer when appropriate.",
+        ? hasEditTool
+          ? "A <TOOL_RESULT> is above. Continue the user's task. If an edit/write/replace tool is still needed, emit the next <TOOL_CALL> now. Otherwise answer from the results."
+          : "Answer from every <TOOL_RESULT> above. Emit another <TOOL_CALL> only if more information is required."
+        : "You stopped calling tools. Answer the user's question from every <TOOL_RESULT> above. Do not announce another search.",
     });
+  }
+
+  // Hard checks last, after the result note. Upstream rejects an
+  // assistant-final turn and an empty message list.
+  const last = messages.at(-1);
+  if (last?.role === "assistant") {
+    const canCallAnotherTool = Boolean(req.tools?.length);
+    messages.push({
+      role: "user",
+      content: canCallAnotherTool
+        ? "Continue. If another listed tool is needed to finish the task, emit a <TOOL_CALL> now; otherwise answer."
+        : "Continue.",
+    });
+  }
+  if (messages.length === 0) {
+    messages.push({ role: "user", content: "Hello." });
   }
 
   // OpenAI `metadata.save` extension → !noSave. Default: don't pollute the
@@ -125,6 +179,11 @@ export function buildUpstreamRequest(
         body: { ...base, modelName: model.modelName, apiKey: null },
       };
     case "lmsys":
+      return {
+        endpoint,
+        body: { ...base, model: model.modelName, apiKey: null },
+      };
+    case "image":
       return {
         endpoint,
         body: { ...base, model: model.modelName, apiKey: null },

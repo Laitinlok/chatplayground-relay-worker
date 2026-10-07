@@ -94,6 +94,41 @@ describe("buildUpstreamRequest — field mapping", () => {
     ]);
   });
 
+
+  it("keeps edit tools available after a tool result on continue turns", () => {
+    const { body } = buildUpstreamRequest(
+      {
+        model: "gpt-5.5",
+        messages: [
+          { role: "user", content: "Fix the file" },
+          {
+            role: "assistant",
+            content: null,
+            tool_calls: [
+              {
+                id: "call_1",
+                type: "function",
+                function: { name: "read_file", arguments: '{"filepath":"a.js"}' },
+              },
+            ],
+          },
+          { role: "tool", content: "file contents" },
+        ],
+        tools: [
+          { type: "function", function: { name: "read_file", parameters: { type: "object", properties: {} } } },
+          { type: "function", function: { name: "edit_existing_file", parameters: { type: "object", properties: {} } } },
+        ],
+      },
+      AZURE_MODEL,
+    );
+    const systemNotes = body.messages
+      .filter((message: { role: string }) => message.role === "system")
+      .map((message: { content: string }) => String(message.content))
+      .join("\n");
+    expect(systemNotes).toMatch(/Continue the user's task|edit\/write\/replace/i);
+    expect(systemNotes).not.toMatch(/Do not announce another search/i);
+  });
+
   it("serializes tool-call history using the injected text protocol", () => {
     const { body } = buildUpstreamRequest(
       {
@@ -115,10 +150,11 @@ describe("buildUpstreamRequest — field mapping", () => {
       },
       AZURE_MODEL,
     );
-    expect(body.messages[0]?.content).toBe(
-      'TOOL_CALL: cron\nARGUMENTS: {"action":"add"}',
-    );
-    expect(body.messages[1]?.content).toContain("[Tool Result]\ncreated");
+    expect(body.messages[0]?.content).toContain("<TOOL_CALL>");
+    expect(body.messages[0]?.content).toContain("tool: cron");
+    expect(body.messages[0]?.content).toContain('{"action":"add"}');
+    expect(body.messages[1]?.content).toContain("<TOOL_RESULT>");
+    expect(body.messages[1]?.content).toContain("created");
   });
   it("forwards the requested output token limit", () => {
     const { body } = buildUpstreamRequest(

@@ -68,7 +68,7 @@ describe("getModels — the three layers", () => {
       string,
       { expirationTtl: number },
     ];
-    expect(key).toBe("models:v4");
+    expect(key).toBe("models:v5");
     expect(JSON.parse(value)[0].id).toBe("gpt-5.6-luna");
     expect(opts.expirationTtl).toBe(3600);
   });
@@ -80,14 +80,16 @@ describe("getModels — parsing the feed", () => {
     return getModels(env);
   };
 
-  it("keeps only chat models and lowercases the provider", async () => {
+  it("keeps chat and image models and lowercases the provider", async () => {
     const out = await discover([
       entry(),
-      entry({ botId: "dall-e", group: "image" }),
+      entry({ botId: "dall-e", group: "image", endpoint: "image" }),
+      entry({ botId: "audio-bot", group: "audio" }),
     ]);
-    expect(out).toHaveLength(1);
+    expect(out).toHaveLength(2);
     expect(out[0]?.provider).toBe("openai");
     expect(out[0]?.upstreamModel).toBe("openai/gpt-5.6-luna");
+    expect(out[1]?.id).toBe("dall-e");
   });
 
   it("does not double-prefix a modelName that already carries a slug", async () => {
@@ -138,9 +140,9 @@ describe("getModels — failure is a 503, never a stale list", () => {
     });
   });
 
-  it("503s when the feed holds no chat models at all", async () => {
+  it("503s when the feed holds no chat or image models at all", async () => {
     await failsWith(async () =>
-      Response.json([entry({ group: "image" })]),
+      Response.json([entry({ group: "audio" })]),
     ).toMatchObject({ status: 503 });
   });
 });

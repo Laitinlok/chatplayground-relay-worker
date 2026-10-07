@@ -2,8 +2,7 @@ import { toEndpoint } from "../constants/endpoints";
 import type { ModelEntry } from "../constants/models";
 import { DISCOVERY_TIMEOUT } from "../constants/timeouts";
 import { OpenAIHTTPError } from "./errors";
-
-const CACHE_KEY = "models:v4"; // v4: entries gained `premiumOnly`
+const CACHE_KEY = "models:v5"; // v5: included image models
 const KV_TTL_S = 60 * 60; // 1 hour
 const MEM_TTL_MS = 5 * 60 * 1000; // 5 min in-isolate cache
 
@@ -87,7 +86,7 @@ async function discover(chatUrl: string): Promise<ModelEntry[]> {
 
   const out: ModelEntry[] = [];
   for (const e of raw) {
-    if (!isApiModel(e) || e.group !== "chat") continue;
+    if (!isApiModel(e) || (e.group !== "chat" && e.group !== "image")) continue;
     // Include inactive models too — `active` is UI visibility only; inactive
     // models (e.g. perplexity sonar-pro) are still callable upstream.
     const provider = e.provider.toLowerCase();

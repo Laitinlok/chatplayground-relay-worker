@@ -12,3 +12,22 @@ export function sanitizeSearchQuery(value: string): string {
     .trim()
     .slice(0, 300);
 }
+
+const CURRENT_EVENT_RE =
+  /\b(?:latest|current|today|tonight|yesterday|recent|breaking|this week|right now|news)\b/i;
+
+/** Prompts about current events cannot be answered from model memory. */
+export function needsCurrentWebSearch(value: string): boolean {
+  return CURRENT_EVENT_RE.test(value);
+}
+
+const TOOL_DECLINE_RE =
+  /\b(?:unable to|cannot|can't|could not|won't|will not|can not)\b[\s\S]{0,100}\b(?:web search|search the web|run (?:the |a )?search|use (?:the |a )?tool|call (?:the |a )?tool|verify|look up|browse)\b|\b(?:web search|search tool) is (?:unavailable|not available|down)\b|\bshare a link\b|\bfrom this chat\b|\b(?:i(?:'ll| will)|let me)\s+(?:check|look up|search|find|verify|distinguish)\b/i;
+
+/** Model answered that it cannot use a tool instead of emitting the call. */
+export function declinedToolUse(value: string): boolean {
+  const normalized = value
+    .replace(/[\u2018\u2019\u201B\u2032]/g, "'")
+    .replace(/[\u201C\u201D]/g, '"');
+  return TOOL_DECLINE_RE.test(normalized);
+}

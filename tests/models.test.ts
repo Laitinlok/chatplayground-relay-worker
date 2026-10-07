@@ -24,8 +24,8 @@ const FEED = [
     endpoint: "lmsys",
     premiumOnly: true,
   },
-  // Not a chat model — discovery drops it before the listing ever sees it.
-  { botId: "dall-e", modelName: "dall-e", provider: "OpenAI", group: "image" },
+  // Audio model — discovery drops it before the listing ever sees it.
+  { botId: "tts-bot", modelName: "tts-bot", provider: "OpenAI", group: "audio" },
 ];
 
 // oxlint-disable-next-line typescript/no-explicit-any -- minimal test env stub
@@ -64,6 +64,20 @@ describe("GET /v1/models", () => {
     const res = await get({ ...env, PREMIUM_MODELS: "true" });
     const ids = ((await res.json()) as ModelList).data.map((m) => m.id);
     expect(ids).toEqual(["gpt-5.6-luna", "grok-4.6"]);
+  });
+
+  it("exposes /v1/models/capabilities with image/chat capability flags", async () => {
+    const app = new Hono<any>();
+    app.onError(errorHandler);
+    app.route("/", models);
+    const res = await app.request("/v1/models/capabilities", {}, env);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as any;
+    expect(body.object).toBe("list");
+    expect(body.data[0]).toMatchObject({
+      id: "gpt-5.6-luna",
+      capabilities: ["chat", "completion"],
+    });
   });
 
   it("503s when discovery fails instead of serving an empty list", async () => {

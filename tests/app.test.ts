@@ -30,9 +30,12 @@ describe("app wiring", () => {
       name: "chatplayground",
       endpoints: [
         "/v1/models",
+        "/v1/models/capabilities",
         "/v1/chat/completions",
         "/v1/responses",
         "/v1/files",
+        "/v1/images/generations",
+        "/v1/embeddings",
       ],
     });
     expect(vi.mocked(fetch)).not.toHaveBeenCalled();

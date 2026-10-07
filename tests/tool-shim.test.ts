@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   buildToolSystemPrompt,
+  gateToolCalls,
   injectReasoningPrompt,
   normalizeOpenAITools,
+  stripToolCallMarkup,
+  toolCallRetrySignal,
   tryParseRelayToolCall,
   type OpenAITool,
 } from "../src/utils/tool-shim";
@@ -13,108 +16,161 @@ const tools: OpenAITool[] = [
 ];
 
 describe("tryParseRelayToolCall", () => {
-  it("accepts close envelope and tool names", () => {
+  it("parses params JSON that contains braces inside string values", () => {
+    const tools: OpenAITool[] = [
+      {
+        type: "function",
+        function: {
+          name: "edit_existing_file",
+          parameters: {
+            type: "object",
+            properties: {
+              filepath: { type: "string" },
+              changes: { type: "string" },
+            },
+            required: ["filepath", "changes"],
+          },
+        },
+      },
+    ];
     const call = tryParseRelayToolCall(
-      '{"relayToolCall":{"toolName":"crno","params":{"action":"add"}}}',
+      `<TOOL_CALL>
+tool: edit_existing_file
+params:
+{"filepath":"a.js","changes":"if (x) { return 1; }"}
+</TOOL_CALL>`,
+      tools,
+    );
+    expect(call?.function.name).toBe("edit_existing_file");
+    expect(JSON.parse(call!.function.arguments)).toEqual({
+      filepath: "a.js",
+      changes: "if (x) { return 1; }",
+    });
+  });
+
+  it("rejects incomplete edit_existing_file calls with broken JSON params", () => {
+    const tools: OpenAITool[] = [
+      {
+        type: "function",
+        function: {
+          name: "edit_existing_file",
+          parameters: {
+            type: "object",
+            properties: {
+              filepath: { type: "string" },
+              changes: { type: "string" },
+            },
+            required: ["filepath", "changes"],
+          },
+        },
+      },
+    ];
+    const broken = `<TOOL_CALL> tool: edit_existing_file params: {"filepath":"utils/searchBrave.js","changes":"function parseBraveData(source) {\n if (source.startsWith("[")) {\n let output = "";"}`;
+    const gated = gateToolCalls(broken, tools);
+    expect(gated.calls).toEqual([]);
+    expect(gated.rejections.length).toBeGreaterThan(0);
+    expect(gated.rejections.join(" ")).toMatch(/Incomplete|JSON|escaped/i);
+    expect(stripToolCallMarkup(broken)).toBe("");
+    expect(toolCallRetrySignal(gated.rejections)).toContain("</TOOL_CALL>");
+  });
+
+  it("rejects unknown tools and missing required args in the gate", () => {
+    const tools: OpenAITool[] = [
+      {
+        type: "function",
+        function: {
+          name: "web_search",
+          parameters: {
+            type: "object",
+            properties: { query: { type: "string" } },
+            required: ["query"],
+          },
+        },
+      },
+    ];
+    const unknown = gateToolCalls(
+      "<TOOL_CALL>\ntool: not_a_tool\nparams:\n{}\n</TOOL_CALL>",
+      tools,
+    );
+    expect(unknown.calls).toEqual([]);
+    expect(unknown.rejections[0]).toContain("Unknown tool");
+
+    const missing = gateToolCalls(
+      "<TOOL_CALL>\ntool: web_search\nparams:\n{}\n</TOOL_CALL>",
+      tools,
+    );
+    expect(missing.calls).toEqual([]);
+    expect(missing.rejections[0]).toContain("missing required");
+    expect(toolCallRetrySignal(missing.rejections)).toContain("rejected by the tool gate");
+  });
+
+  it("keeps valid calls and drops only the invalid ones", () => {
+    const tools: OpenAITool[] = [
+      { type: "function", function: { name: "cron", parameters: { type: "object", properties: {} } } },
+      {
+        type: "function",
+        function: {
+          name: "web_search",
+          parameters: {
+            type: "object",
+            properties: { query: { type: "string" } },
+            required: ["query"],
+          },
+        },
+      },
+    ];
+    const gated = gateToolCalls(
+      `<TOOL_CALL>
+tool: cron
+params:
+{}
+</TOOL_CALL>
+
+<TOOL_CALL>
+tool: web_search
+params:
+{}
+</TOOL_CALL>`,
+      tools,
+    );
+    expect(gated.calls.map((call) => call.function.name)).toEqual(["cron"]);
+    expect(gated.rejections.some((reason) => reason.includes("web_search"))).toBe(true);
+  });
+
+  it("parses the xml tool block", () => {
+    const call = tryParseRelayToolCall(
+      '<TOOL_CALL>\ntool: web_search\nparams:\n{"query":"latest news","max_results":3}\n</TOOL_CALL>',
+      tools,
+    );
+    expect(call?.function.name).toBe("web_search");
+    expect(call?.function.arguments).toContain("latest news");
+  });
+
+  it("accepts a close tool name inside the xml block", () => {
+    const call = tryParseRelayToolCall(
+      '<TOOL_CALL>\ntool: crno\nparams:\n{"action":"add"}\n</TOOL_CALL>',
       tools,
     );
     expect(call?.function.name).toBe("cron");
     expect(call?.function.arguments).toBe('{"action":"add"}');
   });
 
-  it("accepts alternate envelope keys and JSON-encoded arguments", () => {
-    const call = tryParseRelayToolCall(
-      '{"function-call":{"function-name":"web_search","args":"{\\"query\\":\\"openclaw\\"}"}}',
-      tools,
-    );
-    expect(call?.function.name).toBe("web_search");
-    expect(call?.function.arguments).toBe('{"query":"openclaw"}');
-  });
-
-  it("rejects ambiguous fuzzy matches", () => {
-    const ambiguous: OpenAITool[] = [
-      { type: "function", function: { name: "calendar" } },
-      { type: "function", function: { name: "calender" } },
-    ];
+  it("ignores the old text protocol", () => {
     expect(
       tryParseRelayToolCall(
-        '{"call":{"name":"calendr","arguments":{}}}',
-        ambiguous,
-      ),
-    ).toBeNull();
-  });
-
-  it("parses the injected TOOL_CALL text protocol", () => {
-    const call = tryParseRelayToolCall(
-      'I will check that.\nTOOL_CALL: crno\nARGUMENTS: {"action":"add","amount":6600}',
-      tools,
-    );
-    expect(call?.function.name).toBe("cron");
-    expect(call?.function.arguments).toBe('{"action":"add","amount":6600}');
-  });
-
-  it("parses GPT-5 Harmony recipient tool calls", () => {
-    const call = tryParseRelayToolCall(
-      '<|channel|>commentary to=functions.web_search <|constrain|>json<|message|>{"query":"latest news"}',
-      tools,
-    );
-    expect(call?.function.name).toBe("web_search");
-    expect(call?.function.arguments).toBe('{"query":"latest news"}');
-  });
-
-  it("accepts OpenAI web.run recipient calls and normalizes search_query", () => {
-    const call = tryParseRelayToolCall(
-      '<|channel|>commentary to=web.run <|constrain|>json<|message|>{"search_query":"latest news","num_results":3}',
-      tools,
-    );
-    expect(call?.function.name).toBe("web_search");
-    expect(call?.function.arguments).toBe(
-      '{"search_query":"latest news","num_results":3,"query":"latest news"}',
-    );
-  });
-
-  it("accepts fenced JSON tool calls", () => {
-    const call = tryParseRelayToolCall(
-      '```json\n{"name":"web_search_preview","arguments":{"query":"latest news"}}\n```',
-      tools,
-    );
-    expect(call?.function.name).toBe("web_search");
-    expect(call?.function.arguments).toBe('{"query":"latest news"}');
-  });
-  it("does not expose an unknown Harmony recipient as a tool call", () => {
-    expect(
-      tryParseRelayToolCall(
-        '<|channel|>commentary to=functions.delete_all <|message|>{"confirm":true}',
+        'TOOL_CALL: web_search\nARGUMENTS: {"query":"food"}',
         tools,
       ),
     ).toBeNull();
   });
 
-  it("accepts inline TOOL_CALL labels", () => {
-    const call = tryParseRelayToolCall(
-      'I will search. TOOL_CALL: web_search ARGUMENTS: {"query":"food hacks"}',
-      tools,
-    );
-    expect(call?.function.name).toBe("web_search");
-    expect(call?.function.arguments).toBe('{"query":"food hacks"}');
-  });
-
-  it("parses the exact relay text emitted by non-5.x model families", () => {
-    const call = tryParseRelayToolCall(
-      'I\'ll search the web to find the latest TikTok food hacks for you.\r\nTOOL_CALL: ddg_search_search\r\nARGUMENTS: {"query":"latest TikTok food hacks 2025","max_results":10}',
-      normalizeOpenAITools([
-        {
-          type: "function",
-          name: "ddg_search_search",
-          description: "Search the web",
-          parameters: { type: "object" },
-        },
-      ]),
-    );
-    expect(call?.function.name).toBe("ddg_search_search");
-    expect(call?.function.arguments).toBe(
-      '{"query":"latest TikTok food hacks 2025","max_results":10}',
-    );
+  it("rejects a tool that is not listed", () => {
+    expect(
+      tryParseRelayToolCall(
+        '<TOOL_CALL>\ntool: unknown\nparams:\n{}\n</TOOL_CALL>',
+        tools,
+      ),
+    ).toBeNull();
   });
 
   it("normalizes flat Responses-style tools for chat requests", () => {
@@ -173,11 +229,11 @@ describe("tryParseRelayToolCall", () => {
         },
       },
     ]);
-    expect(prompt).toContain("TOOL_CALL: <tool name>");
-    expect(prompt).toContain("city (required): City name");
-    expect(prompt).toContain("Only use tools from this list");
-    expect(prompt).toContain("complete, self-contained final answer");
-    expect(prompt).toContain("emit the call immediately");
+    expect(prompt).toContain("<TOOL_CALL>");
+    expect(prompt).toContain("get_weather");
+    expect(prompt).toContain('"city"');
+    expect(prompt).toContain("<AVAILABLE_TOOLS>");
+    expect(prompt).toContain("one <TOOL_CALL> block per tool");
   });
   it("adds a strict dispatch protocol for Perplexity models", () => {
     const prompt = buildToolSystemPrompt(
@@ -185,17 +241,10 @@ describe("tryParseRelayToolCall", () => {
       "auto",
       "perplexity",
     );
-    expect(prompt).toContain("Perplexity compatibility mode is active");
-    expect(prompt).toContain("do not answer, browse, cite sources");
-    expect(prompt).toContain("exactly one call in the required TOOL_CALL format");
-  });
-
-  it("parses Perplexity's tagged tool-call dialect", () => {
-    const call = tryParseRelayToolCall(
-      '<|tool_call|>{"name":"cron","arguments":{"action":"add"}}<|/tool_call|>',
-      tools,
-    );
-    expect(call?.function.name).toBe("cron");
-    expect(call?.function.arguments).toBe('{"action":"add"}');
+    expect(prompt).toContain("<TOOL_RULES>");
+    expect(prompt).toContain("edit_file");
+    expect(prompt).toContain("<TOOL_CALL>");
   });
 });
+
+

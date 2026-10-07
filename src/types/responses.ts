@@ -90,7 +90,16 @@ export interface ResponsesWebSearchCallOutput {
   results: Array<{ title: string; url: string; snippet: string }>;
 }
 
+export interface ResponsesReasoningOutput {
+  type: "reasoning";
+  id: string;
+  status: "completed";
+  summary: Array<{ type: "summary_text"; text: string }>;
+  content: Array<{ type: "reasoning_text"; text: string }>;
+}
+
 export type ResponsesOutput =
+  | ResponsesReasoningOutput
   | ResponsesMessageOutput
   | ResponsesFunctionCallOutput
   | ResponsesWebSearchCallOutput;
@@ -249,7 +258,7 @@ export function chatResultToResponses(
   reasoningContent = "",
 ): ResponsesResponse {
   const created_at = Math.floor(Date.now() / 1000);
-  const output: ResponsesOutput[] = toolCall
+  const baseOutput: ResponsesOutput[] = toolCall
     ? [
         {
           type: "function_call",
@@ -269,6 +278,20 @@ export function chatResultToResponses(
           content: [{ type: "output_text", text: content, annotations: [] }],
         },
       ];
+  // Emit reasoning as its own output item ahead of the message/function_call,
+  // mirroring native reasoning models in the Responses API.
+  const output: ResponsesOutput[] = reasoningContent
+    ? [
+        {
+          type: "reasoning",
+          id: `rs_${id.replace(/^resp_/, "")}`,
+          status: "completed",
+          summary: [{ type: "summary_text", text: reasoningContent }],
+          content: [{ type: "reasoning_text", text: reasoningContent }],
+        },
+        ...baseOutput,
+      ]
+    : baseOutput;
   const input_tokens = Math.ceil(
     inputMessages.reduce(
       (sum, message) =>

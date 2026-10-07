@@ -23,18 +23,27 @@ import {
   splitReasoningContent,
 } from "../utils/upstream-stream";
 import {
+  gateToolCalls,
   injectReasoningPrompt,
   injectToolPrompt,
+  normalizeOpenAITools,
+  stripToolCallMarkup,
+  rejectedToolCallStub,
+  toolCallRetrySignal,
   tryParseRelayToolCall,
+  tryParseRelayToolCalls,
 } from "../utils/tool-shim";
 import {
   webSearch,
   webFetchFromSearchResults,
   type WebSearchResult,
 } from "../utils/cloudflare-search-api";
-import { sanitizeSearchQuery } from "../utils/search-query";
+import { declinedToolUse, needsCurrentWebSearch, sanitizeSearchQuery } from "../utils/search-query";
 import { compactSearchToolResult } from "../utils/search-tool-context";
 import { resolveCitationTitles } from "../utils/citation-titles";
+import {
+  resolveReasoningEffort,
+} from "../utils/reasoning-prefill";
 
 const MAX_HOSTED_TOOL_STEPS = 8;
 const MAX_WEB_SEARCH_CALLS = 4;
@@ -379,6 +388,39 @@ export function streamResponse(
             }),
           ),
         );
+      } else if (output?.type === "reasoning") {
+        const text = output.content.map((part) => part.text).join("");
+        controller.enqueue(
+          encoder.encode(
+            send("response.output_item.added", {
+              type: "response.output_item.added",
+              output_index: outputIndex,
+              item: output,
+            }),
+          ),
+        );
+        if (text) {
+          controller.enqueue(
+            encoder.encode(
+              send("response.reasoning_text.delta", {
+                type: "response.reasoning_text.delta",
+                item_id: output.id,
+                output_index: outputIndex,
+                content_index: 0,
+                delta: text,
+              }),
+            ),
+          );
+        }
+        controller.enqueue(
+          encoder.encode(
+            send("response.output_item.done", {
+              type: "response.output_item.done",
+              output_index: outputIndex,
+              item: output,
+            }),
+          ),
+        );
       } else if (output?.type === "message") {
         const text = result.output_text;
         const part = output.content[0];
@@ -415,7 +457,7 @@ export function streamResponse(
             ),
           );
         }
-        for (const [annotationIndex, annotation] of part.annotations.entries()) {
+        for (const [annotationIndex, annotation] of part?.annotations.entries() ?? []) {
           controller.enqueue(
             encoder.encode(
               send("response.output_text.annotation.added", {
@@ -497,8 +539,19 @@ responses.post("/v1/responses", async (c) => {
   if (!model) throw modelNotFound(raw.model);
 
   const request = responsesToChatRequest({ ...raw, input });
-  const reasoningEffort = request.reasoning_effort;
-  if (reasoningEffort) {
+  const reasoningRequested = Boolean(request.reasoning_effort);
+  // Upstream is still chatplayground chat. Luna only emits reliable tool
+  // calls / answers when reasoning_effort is "none" — same as /v1/chat.
+  // Count tools after OpenAI web_search_preview → web_search/web_fetch mapping.
+  const lunaWithTools =
+    model.modelName.toLowerCase().includes("luna") &&
+    (normalizeOpenAITools(request.tools).length > 0 ||
+      normalizeOpenAITools(raw.tools).length > 0);
+  const reasoningEffort = lunaWithTools
+    ? "none"
+    : resolveReasoningEffort(model.modelName, request.reasoning_effort);
+  if (reasoningEffort) request.reasoning_effort = reasoningEffort;
+  if (reasoningRequested && reasoningEffort && reasoningEffort !== "none") {
     request.messages = injectReasoningPrompt(request.messages, reasoningEffort);
   }
   if (request.messages.length === 0)
@@ -549,32 +602,45 @@ responses.post("/v1/responses", async (c) => {
   const searches: Array<{ query: string; results: WebSearchResult[] }> = [];
   const fetchedPages = new Map<string, WebSearchResult>();
   const toolsRequested = toolsForModel.length > 0;
+  const latestUserText = [...request.messages].reverse().reduce((found, message) => {
+    if (found || message.role !== "user") return found;
+    return typeof message.content === "string" ? message.content : found;
+  }, "");
+  const forceCurrentSearch = webSearchRequested && needsCurrentWebSearch(latestUserText);
+  const hasToolResult = request.messages.some((message) => message.role === "tool");
+  if (toolsRequested && !hasToolResult && request.tool_choice !== "none") {
+    request.tool_choice = request.tool_choice ?? "required";
+  }
   if (toolsRequested) {
     // Search is model-directed: do not call the search service merely because
     // the request advertises a web-search tool. Execute it only after the
-    // model emits a parsed web_search call below.
-    if (webSearchRequested) request.tool_choice = "auto";
+    // model emits a parsed web_search call below. Current-events prompts are
+    // the exception: web_search is required before any answer.
+    if (forceCurrentSearch && !hasToolResult) request.tool_choice = "required";
+    else if (webSearchRequested) request.tool_choice = request.tool_choice ?? "auto";
     request.tools = toolsForModel;
     request.messages = injectToolPrompt(
       request.messages,
       toolsForModel,
-      webSearchRequested ? "auto" : request.tool_choice,
+      request.tool_choice,
       model.endpoint === "perplexity" ? "perplexity" : undefined,
     );
   }
 
+  const sessionToken = await c.get("sessionToken")();
   let rawContent = "";
   let citations: Awaited<ReturnType<typeof collectUpstream>>["citations"] = [];
   let toolCall: ReturnType<typeof tryParseRelayToolCall> = null;
   let chatId: string | null = null;
   let upstream: Response | null = null;
   let parsedContent: Awaited<ReturnType<typeof collectUpstream>> | null = null;
+  let toolGate: ReturnType<typeof gateToolCalls> = { calls: [], rejections: [] };
 
   for (let step = 0; step <= MAX_HOSTED_TOOL_STEPS; step++) {
     const built = buildUpstreamRequest(request, model);
     upstream = await fetch(endpointUrl(built.endpoint, c.env.UPSTREAM_CHAT_URL), {
       method: "POST",
-      headers: buildUpstreamHeaders(await c.get("sessionToken")(), c.env),
+      headers: buildUpstreamHeaders(sessionToken, c.env),
       body: JSON.stringify(built.body),
       signal: AbortSignal.timeout(CHAT_TIMEOUT),
     });
@@ -607,16 +673,63 @@ responses.post("/v1/responses", async (c) => {
 
     parsedContent = await collectUpstream(upstream.body);
     rawContent = extractResponsesText(parsedContent.content);
-    toolCall = toolsRequested
-      ? tryParseRelayToolCall(rawContent, request.tools)
-      : null;
-    if (!toolCall || !webSearchRequested || step === MAX_HOSTED_TOOL_STEPS) break;
+    toolGate = toolsRequested
+      ? gateToolCalls(rawContent, request.tools)
+      : { calls: [], rejections: [] };
+    // Wrong/invalid tool calls: retry once with the gate rejection signal.
+    // Skip the retry when a valid call already exists — avoids Agora timeout retries.
+    if (toolsRequested && toolGate.rejections.length > 0 && toolGate.calls.length === 0) {
+      request.messages = [
+        ...request.messages,
+        { role: "assistant", content: rejectedToolCallStub(toolGate.rejections) },
+        { role: "user", content: toolCallRetrySignal(toolGate.rejections) },
+      ];
+      const gateBuilt = buildUpstreamRequest(request, model);
+      const gateRetry = await fetch(endpointUrl(gateBuilt.endpoint, c.env.UPSTREAM_CHAT_URL), {
+        method: "POST",
+        headers: buildUpstreamHeaders(sessionToken, c.env),
+        body: JSON.stringify(gateBuilt.body),
+        signal: AbortSignal.timeout(CHAT_TIMEOUT),
+      });
+      if (gateRetry.ok && gateRetry.body) {
+        const gateParsed = await collectUpstream(gateRetry.body);
+        const gated = gateToolCalls(extractResponsesText(gateParsed.content), request.tools);
+        if (gated.rejections.length === 0) {
+          rawContent = extractResponsesText(gateParsed.content);
+          parsedContent = gateParsed;
+          toolGate = gated;
+        } else {
+          toolGate = { calls: [], rejections: gated.rejections };
+          rawContent = stripToolCallMarkup(extractResponsesText(gateParsed.content)) || stripToolCallMarkup(rawContent);
+          parsedContent = gateParsed;
+        }
+      } else {
+        toolGate = { calls: [], rejections: toolGate.rejections };
+        rawContent = stripToolCallMarkup(rawContent);
+      }
+    } else if (toolsRequested && /<TOOL_CALL\b/i.test(rawContent) && toolGate.calls.length === 0) {
+      rawContent = stripToolCallMarkup(rawContent);
+    }
+    const toolCalls = toolGate.calls;
+    toolCall = toolCalls[0] ?? null;
+    if (!toolCall && !hasToolResult && searches.length === 0 && (forceCurrentSearch || declinedToolUse(rawContent))) {
+      const query = sanitizeSearchQuery(latestUserText);
+      if (query) {
+        rawContent = `<TOOL_CALL>\ntool: web_search\nparams:\n${JSON.stringify({ query, max_results: 5 })}\n</TOOL_CALL>`;
+        toolCall = tryParseRelayToolCall(rawContent, request.tools);
+      }
+    }
+    // One call per step so multi-search turns don't look stuck.
+    const calls = (toolCall && toolCalls.length === 0 ? [toolCall] : toolCalls).slice(0, 1);
+    if (calls.length === 0 || !webSearchRequested || step === MAX_HOSTED_TOOL_STEPS) break;
 
+    let delegated: typeof toolCall = null;
+    for (const call of calls) {
     let toolResult: unknown;
-    let toolName = toolCall.function.name;
+    let toolName = call.function.name;
     let args: Record<string, unknown> = {};
     try {
-      const parsedArgs: unknown = JSON.parse(toolCall.function.arguments);
+      const parsedArgs: unknown = JSON.parse(call.function.arguments);
       if (parsedArgs && typeof parsedArgs === "object" && !Array.isArray(parsedArgs)) {
         args = parsedArgs as Record<string, unknown>;
       }
@@ -624,7 +737,7 @@ responses.post("/v1/responses", async (c) => {
       toolResult = { error: "Tool arguments were not valid JSON." };
     }
 
-    if (toolCall.function.name === "web_search") {
+    if (call.function.name === "web_search") {
       if (searches.length >= MAX_WEB_SEARCH_CALLS) {
         toolResult = { error: "Search call limit reached for this response." };
       } else if (typeof args.query !== "string" || !args.query.trim()) {
@@ -640,11 +753,16 @@ responses.post("/v1/responses", async (c) => {
           token: c.env.CLOUDFLARE_SEARCH_TOKEN,
           count,
         });
+        if (results.length === 0) {
+          // Cloudflare + Jina both failed: hand web_search to the client.
+          delegated = call;
+          break;
+        }
         searches.push({ query, results });
         for (const result of results) fetchedPages.set(result.url, result);
         toolResult = { query, count, results };
       }
-    } else if (toolCall.function.name === "web_fetch") {
+    } else if (call.function.name === "web_fetch") {
       const url = typeof args.url === "string" ? args.url : "";
       const extracted = await webFetchFromSearchResults(url, fetchedPages);
       toolResult = extracted ?? {
@@ -654,31 +772,96 @@ responses.post("/v1/responses", async (c) => {
       break;
     }
 
-    const previousToolCall = toolCall;
     request.messages.push({
       role: "assistant",
       content: null,
-      tool_calls: [previousToolCall],
+      tool_calls: [call],
     });
     request.messages.push({
       role: "tool",
-      name: previousToolCall.function.name,
+      name: call.function.name,
       content: compactSearchToolResult(
         JSON.stringify(toolResult ?? { error: "Tool did not return a result." }),
-        previousToolCall.function.name,
+        call.function.name,
       ),
     });
+    }
+    if (delegated) {
+      toolCall = delegated;
+      break;
+    }
+    toolCall = null;
   }
 
   if (!parsedContent) throw upstreamError(502, "No upstream model response was received.");
   citations = parsedContent.citations;
   chatId = parsedContent.chatId;
-  const split = splitReasoningContent(rawContent);
-  const visibleContent = split.content || split.reasoningContent;
-  if (!visibleContent.trim() && !toolCall) {
-    throw upstreamError(200, "Provider returned HTTP 200 but no text content.");
+
+  // Luna sometimes returns an empty or plan-only turn after tool results.
+  // Retry once asking for the answer; only then fail soft.
+  if (
+    !toolCall &&
+    request.messages.some((message) => message.role === "tool") &&
+    (!rawContent.trim() || declinedToolUse(rawContent))
+  ) {
+    request.messages = [
+      ...request.messages,
+      ...(rawContent.trim()
+        ? [{ role: "assistant" as const, content: rawContent }]
+        : []),
+      {
+        role: "user",
+        content:
+          "The tool result is already above. Answer the user's question from it now. Do not say you will check, search, or look it up.",
+      },
+    ];
+    const retryBuilt = buildUpstreamRequest(request, model);
+    const retry = await fetch(endpointUrl(retryBuilt.endpoint, c.env.UPSTREAM_CHAT_URL), {
+      method: "POST",
+      headers: buildUpstreamHeaders(sessionToken, c.env),
+      body: JSON.stringify(retryBuilt.body),
+      signal: AbortSignal.timeout(CHAT_TIMEOUT),
+    });
+    if (retry.ok && retry.body) {
+      const retryParsed = await collectUpstream(retry.body);
+      const retryText = extractResponsesText(retryParsed.content).trim();
+      const retryCall = toolsRequested
+        ? tryParseRelayToolCall(retryText, request.tools)
+        : null;
+      if (retryText && !retryCall && !declinedToolUse(retryText)) {
+        rawContent = retryParsed.content;
+        citations = retryParsed.citations;
+        if (retryParsed.chatId) chatId = retryParsed.chatId;
+        parsedContent = retryParsed;
+      }
+    }
   }
-  const content = toolCall ? "" : visibleContent;
+
+  // Never return raw tool XML as the assistant answer — Agora treats that as
+  // a failed tool turn and shows "retry 1/5".
+  if (!toolCall) rawContent = stripToolCallMarkup(rawContent);
+
+  let split = splitReasoningContent(rawContent);
+  let visibleContent = split.content || split.reasoningContent;
+  if (!visibleContent.trim() && !toolCall) {
+    if (toolsRequested && toolGate.rejections.length > 0) {
+      // Invalid tool call after gate retry: soft-complete instead of empty 200.
+      // Empty 200s make Agora retry the whole Responses request.
+      rawContent =
+        "The previous tool call was invalid and was not executed. Please retry with a complete tool call block and valid JSON params.";
+      split = splitReasoningContent(rawContent);
+      visibleContent = split.content || split.reasoningContent;
+    } else if (request.messages.some((message) => message.role === "tool")) {
+      rawContent =
+        "I could not produce a final answer from the tool results. Please retry the request.";
+      split = splitReasoningContent(rawContent);
+      visibleContent = split.content || split.reasoningContent;
+    } else {
+      throw upstreamError(200, "Provider returned HTTP 200 but no text content.");
+    }
+  }
+  // Final belt-and-suspenders: if somehow markup survived, strip before output.
+  const content = toolCall ? "" : stripToolCallMarkup(visibleContent);
   const baseResult = chatResultToResponses(
     model.id,
     content,

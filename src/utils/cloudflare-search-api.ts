@@ -1,8 +1,6 @@
-const SEARCH_TIMEOUT_MS = 8_000;
+const SEARCH_TIMEOUT_MS = 3_000;
 const MAX_QUERY_CHARS = 300;
 const MAX_RESULTS = 50;
-const SEARCH_MAX_ATTEMPTS = 3;
-const SEARCH_RETRY_DELAY_MS = 250;
 const MAX_RESULT_TITLE_CHARS = 180;
 const MAX_RESULT_SNIPPET_CHARS = 600;
 const MAX_RESULT_CONTEXT_CHARS = 8_000;
@@ -75,117 +73,212 @@ function normalizeResult(value: Record<string, unknown>): WebSearchResult | null
   }
 }
 
-export async function webSearch(
-  query: string,
-  options: CloudflareSearchOptions = {},
-): Promise<WebSearchResult[]> {
-  const normalizedQuery = query.trim().slice(0, MAX_QUERY_CHARS);
-  const endpoint = searchEndpoint(options.url);
-  if (!normalizedQuery || !endpoint) {
-    console.warn("Cloudflare Search URL or query is missing", {
-      hasQuery: Boolean(normalizedQuery),
-      hasUrl: Boolean(options.url),
-    });
-    return [];
-  }
+const JINA_READER = "https://r.jina.ai/";
+const JINA_FETCH_TIMEOUT_MS = 15_000;
+const MAX_JINA_FETCH_BYTES = 1_000_000;
+const DDG_HTML = "https://html.duckduckgo.com/html/";
 
-  const count = Number.isInteger(options.count)
-    ? Math.min(MAX_RESULTS, Math.max(1, options.count!))
-    : 5;
-  const form = new URLSearchParams({ q: normalizedQuery });
+function decodeHref(value: string): string {
+  return value
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"')
+    .replace(/&#x27;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">");
+}
+
+/** DuckDuckGo wraps the destination in /l/?uddg=. Return the real URL. */
+function destinationUrl(href: string): string | null {
+  const decoded = decodeHref(href);
+  try {
+    const url = new URL(decoded, DDG_HTML);
+    const wrapped = url.searchParams.get("uddg");
+    const target = wrapped ? new URL(wrapped) : url;
+    if (target.protocol !== "https:" && target.protocol !== "http:") return null;
+    if (target.hostname.endsWith("duckduckgo.com")) return null;
+    return target.toString();
+  } catch {
+    return null;
+  }
+}
+
+function parseDuckDuckGoHtml(html: string, count: number): WebSearchResult[] {
+  const results: WebSearchResult[] = [];
+  const blocks = html.split(/<div[^>]*class="[^"]*result[^"]*"/i).slice(1);
+  for (const block of blocks) {
+    const link = block.match(/<a[^>]*class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/i);
+    if (!link?.[1]) continue;
+    const url = destinationUrl(link[1]);
+    if (!url) continue;
+    const title = decodeHref(link[2] ?? "").replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim();
+    const snippet = decodeHref(block.match(/<a[^>]*class="[^"]*result__snippet[^"]*"[^>]*>([\s\S]*?)<\/a>/i)?.[1] ?? "")
+      .replace(/<[^>]+>/g, "")
+      .replace(/\s+/g, " ")
+      .trim();
+    results.push({ title: title || url, url, snippet });
+    if (results.length >= count) break;
+  }
+  return compactResults(results);
+}
+
+/** Jina Reader returns DuckDuckGo HTML as Markdown, not raw HTML. */
+function parseDuckDuckGoMarkdown(markdown: string, count: number): WebSearchResult[] {
+  const results: WebSearchResult[] = [];
+  const seen = new Set<string>();
+  // ## [Title](https://duckduckgo.com/l/?uddg=...)
+  const headingRe = /^##\s+\[(.+?)\]\((https?:[^)\s]+)\)/gm;
+  let match: RegExpExecArray | null;
+  while ((match = headingRe.exec(markdown)) !== null) {
+    const title = decodeHref(match[1] ?? "").replace(/\s+/g, " ").trim();
+    const url = destinationUrl(match[2] ?? "");
+    if (!url || seen.has(url)) continue;
+    // Snippet: next non-empty paragraph-like line that is not another heading/image.
+    const after = markdown.slice(match.index + match[0].length);
+    const snippetLine = after
+      .split("\n")
+      .map((line) => line.trim())
+      .find(
+        (line) =>
+          line.length > 0 &&
+          !line.startsWith("## ") &&
+          !line.startsWith("![") &&
+          !line.startsWith("[](") &&
+          !/^\[(?:Image|![^\]]*)/i.test(line),
+      );
+    const snippet = decodeHref(snippetLine ?? "")
+      .replace(/\[([^\]]+)\]\((https?:[^)]+)\)/g, "$1")
+      .replace(/\*\*/g, "")
+      .replace(/\s+/g, " ")
+      .trim();
+    seen.add(url);
+    results.push({ title: title || url, url, snippet });
+    if (results.length >= count) break;
+  }
+  return compactResults(results);
+}
+
+function parseCloudflarePayload(payload: unknown, count: number): WebSearchResult[] {
+  const rawResults =
+    payload && typeof payload === "object" && Array.isArray((payload as { results?: unknown }).results)
+      ? ((payload as { results: unknown[] }).results)
+      : [];
+  return compactResults(
+    rawResults
+      .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object"))
+      .map(normalizeResult)
+      .filter((item): item is WebSearchResult => item !== null)
+      .slice(0, count),
+  );
+}
+
+/** One Jina read of DuckDuckGo. Parses Markdown (Jina) or HTML. */
+async function searchDuckDuckGo(query: string, count: number): Promise<WebSearchResult[]> {
+  const target = `${DDG_HTML}?q=${encodeURIComponent(query)}`;
+  const response = await fetch(`${JINA_READER}${target}`, {
+    headers: { accept: "text/plain" },
+    signal: AbortSignal.timeout(Math.max(SEARCH_TIMEOUT_MS, 8_000)),
+  });
+  if (!response.ok) return [];
+  const text = await response.text();
+  const fromMarkdown = parseDuckDuckGoMarkdown(text, count);
+  if (fromMarkdown.length > 0) return fromMarkdown;
+  return parseDuckDuckGoHtml(text, count);
+}
+
+/** One Cloudflare Search request. Auth via Bearer when a token is configured. */
+async function searchCloudflare(
+  query: string,
+  count: number,
+  options: CloudflareSearchOptions,
+): Promise<WebSearchResult[]> {
+  const endpoint = searchEndpoint(options.url);
+  if (!endpoint) return [];
+  const headers: Record<string, string> = {
+    accept: "application/json",
+    "content-type": "application/x-www-form-urlencoded",
+  };
+  if (options.token) headers.authorization = `Bearer ${options.token}`;
+  const form = new URLSearchParams({ q: query });
   if (options.token) form.set("token", options.token);
 
-  for (let attempt = 1; attempt <= SEARCH_MAX_ATTEMPTS; attempt++) {
-    try {
-      const response = await fetch(endpoint, {
+  // Prefer POST. If the worker rejects it, fall back to GET (live service auths on GET).
+  const attempts: Array<() => Promise<Response>> = [
+    () =>
+      fetch(endpoint, {
         method: "POST",
-        headers: { accept: "application/json", "content-type": "application/x-www-form-urlencoded" },
+        headers,
         body: form.toString(),
         signal: AbortSignal.timeout(SEARCH_TIMEOUT_MS),
+      }),
+    () => {
+      const url = new URL(endpoint);
+      url.searchParams.set("q", query);
+      if (options.token) url.searchParams.set("token", options.token);
+      const getHeaders: Record<string, string> = { accept: "application/json" };
+      if (options.token) getHeaders.authorization = `Bearer ${options.token}`;
+      return fetch(url.toString(), {
+        method: "GET",
+        headers: getHeaders,
+        signal: AbortSignal.timeout(SEARCH_TIMEOUT_MS),
       });
-      const responseText = await response.text();
-      let payload: Record<string, unknown> | null = null;
-      try {
-        const parsed: unknown = JSON.parse(responseText);
-        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-          payload = parsed as Record<string, unknown>;
-        }
-      } catch {
-        // Include a bounded body excerpt in diagnostics below for non-JSON errors.
-      }
+    },
+  ];
 
+  for (const run of attempts) {
+    try {
+      const response = await run();
       if (!response.ok) {
         console.warn("Cloudflare Search returned an error response", {
-          endpoint,
-          query: normalizedQuery.slice(0, 120),
+          query: query.slice(0, 120),
           status: response.status,
-          attempt,
-          maxAttempts: SEARCH_MAX_ATTEMPTS,
-          contentType: response.headers.get("content-type"),
-          body: responseText.slice(0, 500),
         });
-        // Retry temporary throttling, timeout, and server failures, but do not
-        // repeat requests that are rejected for configuration/auth reasons.
-        const retryable = response.status === 408 || response.status === 429 || response.status >= 500;
-        if (!retryable || attempt === SEARCH_MAX_ATTEMPTS) return [];
-      } else {
-        const rawResults = Array.isArray(payload?.results) ? payload.results : [];
-        const results = compactResults(
-          rawResults
-            .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object"))
-            .map(normalizeResult)
-            .filter((item): item is WebSearchResult => item !== null)
-            .slice(0, count),
-        );
-        if (results.length > 0) {
-          console.log("Cloudflare Search succeeded", {
-            endpoint,
-            query: normalizedQuery.slice(0, 120),
-            status: response.status,
-            count: results.length,
-            attempt,
-            requestedEngines: "service defaults",
-          });
-          return results;
-        }
-        console.warn("Cloudflare Search returned no usable results", {
-          endpoint,
-          query: normalizedQuery.slice(0, 120),
-          status: response.status,
-          attempt,
-          maxAttempts: SEARCH_MAX_ATTEMPTS,
-          responseKeys: payload ? Object.keys(payload) : [],
-          reportedResultCount: payload?.number_of_results,
-          enabledEngines: payload?.enabled_engines,
-          unresponsiveEngines: payload?.unresponsive_engines,
-          body: responseText.slice(0, 500),
-        });
+        // 401/403 mean auth config is wrong; still try the next transport once.
+        if (response.status === 404) continue;
+        if (response.status >= 500) continue;
+        if (response.status === 401 || response.status === 403) continue;
+        return [];
       }
+      const payload: unknown = await response.json().catch(() => null);
+      const results = parseCloudflarePayload(payload, count);
+      if (results.length > 0) return results;
     } catch (error) {
       console.warn("Cloudflare Search request failed", {
-        attempt,
-        maxAttempts: SEARCH_MAX_ATTEMPTS,
-        error: String(error),
+        query: query.slice(0, 120),
+        error: error instanceof Error ? error.message : "unknown",
       });
-      if (attempt === SEARCH_MAX_ATTEMPTS) return [];
-    }
-
-    if (attempt < SEARCH_MAX_ATTEMPTS) {
-      await new Promise((resolve) =>
-        setTimeout(resolve, SEARCH_RETRY_DELAY_MS * attempt),
-      );
     }
   }
   return [];
 }
 
-const JINA_FETCH_TIMEOUT_MS = 6_000;
-const MAX_JINA_FETCH_BYTES = 64 * 1024;
+/** Cloudflare Search, then Jina/DuckDuckGo. Empty means the caller falls back to a web_search tool call. */
+export async function webSearch(
+  query: string,
+  options: CloudflareSearchOptions = {},
+): Promise<WebSearchResult[]> {
+  const normalizedQuery = query.trim().slice(0, MAX_QUERY_CHARS);
+  if (!normalizedQuery) return [];
+  const count = Number.isInteger(options.count)
+    ? Math.min(MAX_RESULTS, Math.max(1, options.count!))
+    : 5;
+  const sources: Array<[string, () => Promise<WebSearchResult[]>]> = [
+    ["Cloudflare Search", () => searchCloudflare(normalizedQuery, count, options)],
+    ["DuckDuckGo via Jina", () => searchDuckDuckGo(normalizedQuery, count)],
+  ];
+  for (const [name, run] of sources) {
+    try {
+      const results = await run();
+      if (results.length > 0) return results;
+    } catch (error) {
+      console.warn(`${name} failed`, {
+        query: normalizedQuery.slice(0, 120),
+        error: error instanceof Error ? error.message : "unknown",
+      });
+    }
+  }
+  return [];
+}
 
-/**
- * Fetch the full text for a search result using Jina Reader (r.jina.ai).
- * Falls back to the cached snippet if extraction fails or times out.
- */
 export async function webFetchFromSearchResults(
   url: string,
   results: ReadonlyMap<string, WebSearchResult>,

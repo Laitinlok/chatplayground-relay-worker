@@ -4,7 +4,7 @@ import { webSearch } from "../src/utils/web-search";
 afterEach(() => vi.restoreAllMocks());
 
 describe("Cloudflare Search web search", () => {
-  it("normalizes aggregated results and sends the configured token", async () => {
+  it("normalizes aggregated results and sends the configured Bearer token", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       Response.json({
         results: [
@@ -38,6 +38,9 @@ describe("Cloudflare Search web search", () => {
     expect(new Headers(init.headers).get("content-type")).toContain(
       "application/x-www-form-urlencoded",
     );
+    expect(new Headers(init.headers).get("authorization")).toBe(
+      "Bearer test-search-token",
+    );
     expect(String(init.body)).toContain("q=latest+climate+report");
     expect(String(init.body)).toContain("token=test-search-token");
   });
@@ -69,19 +72,75 @@ describe("Cloudflare Search web search", () => {
     expect(results.some((result) => result.title === "Unsafe")).toBe(false);
   });
 
-  it("rejects an invalid search URL and returns no results", async () => {
-    const fetch = vi.spyOn(globalThis, "fetch");
-    await expect(webSearch("query", { url: "file:///tmp/search" })).resolves.toEqual([]);
-    expect(fetch).not.toHaveBeenCalled();
+  it("falls back to Jina Markdown DuckDuckGo results when Cloudflare fails", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.includes("search.example.test")) {
+        return new Response("unauthorized", { status: 401 });
+      }
+      return new Response(
+        [
+          "Title: query at DuckDuckGo",
+          "",
+          "Markdown Content:",
+          "## [OpenAI News](https://duckduckgo.com/l/?uddg=https%3A%2F%2Fopenai.com%2Fnews%2F&rut=abc)",
+          "",
+          "[Stay up to speed on AI.](https://duckduckgo.com/l/?uddg=https%3A%2F%2Fopenai.com%2Fnews%2F&rut=abc)",
+          "",
+          "## [Reuters OpenAI](https://duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.reuters.com%2Ftechnology%2Fopenai%2F&rut=def)",
+          "",
+          "Latest OpenAI stories from Reuters.",
+        ].join("\n"),
+      );
+    });
+
+    const results = await webSearch("query", { url: "https://search.example.test" });
+    expect(results.length).toBeGreaterThan(0);
+    expect(results[0]).toEqual({
+      title: "OpenAI News",
+      url: "https://openai.com/news/",
+      snippet: "Stay up to speed on AI.",
+    });
+    expect(results[1]?.url).toBe("https://www.reuters.com/technology/openai/");
+    expect(fetchMock.mock.calls.map(([url]) => String(url)).some((url) => url.includes("r.jina.ai"))).toBe(true);
   });
 
-  it("returns no results when the search service fails", async () => {
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response("unauthorized", { status: 401 }),
+  it("rejects an invalid search URL and falls back to Jina/DuckDuckGo", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response("", { status: 500 }),
     );
+    await expect(webSearch("query", { url: "not-a-url" })).resolves.toEqual([]);
+    expect(fetchMock).toHaveBeenCalled();
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain("r.jina.ai");
+  });
 
-    await expect(
-      webSearch("query", { url: "https://search.example.test" }),
-    ).resolves.toEqual([]);
+  it("tries GET when Cloudflare POST fails with 500", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url.includes("search.example.test") && (init?.method ?? "GET") === "POST") {
+        return new Response("worker error", { status: 500 });
+      }
+      if (url.includes("search.example.test")) {
+        return Response.json({
+          results: [
+            {
+              title: "Via GET",
+              url: "https://example.org/get",
+              description: " recovered",
+            },
+          ],
+        });
+      }
+      return new Response("", { status: 500 });
+    });
+
+    const results = await webSearch("query", {
+      url: "https://search.example.test",
+      token: "tok",
+    });
+    expect(results).toEqual([
+      { title: "Via GET", url: "https://example.org/get", snippet: "recovered" },
+    ]);
+    expect(fetchMock.mock.calls.some(([, init]) => (init?.method ?? "GET") === "GET")).toBe(true);
   });
 });
