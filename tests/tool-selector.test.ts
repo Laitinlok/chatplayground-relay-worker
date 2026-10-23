@@ -62,6 +62,15 @@ describe("embedding-assisted tool ranking", () => {
     );
     expect(ambiguous?.confident).toBe(false);
     await expect(
+      rankToolsByEmbedding("Change the event", tools),
+    ).resolves.toBeNull();
+
+    const weak = await rankToolsByEmbedding("Change the event", tools, {
+      run: async () => ({ data: [[1, 0], [0.2, 0.98], [0.1, 0.99]] }),
+    });
+    expect(weak?.confident).toBe(false);
+
+    await expect(
       rankToolsByEmbedding("Change the event", tools, {
         run: async () => {
           throw new Error("AI unavailable");
