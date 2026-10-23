@@ -247,11 +247,10 @@ describe("buildUpstreamRequest — field mapping", () => {
       AZURE_MODEL,
     );
     const systemNotes = body.messages
-      .filter((message: { role: string }) => message.role === "system")
       .map((message) => String(message.content))
       .join("\n");
     expect(systemNotes).toMatch(
-      /Continue the user's task|edit\/write\/replace/i,
+      /System: .*Continue the user's task|edit\/write\/replace/i,
     );
     expect(systemNotes).not.toMatch(/Do not announce another search/i);
   });
