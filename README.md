@@ -196,36 +196,7 @@ hardcoded fallback list would (see [Model discovery](#model-discovery)).
 `lifetimeOnly` is a separate feed flag; those models need a lifetime plan on
 the web UI but are **not** `premiumOnly`, so they are listed by default.
 
-<!-- Historical model snapshot removed: the upstream feed changes regularly. -->
 
-| Model id (use this in `model` field) | Provider | Endpoint | Vision | Access |
-|---|---|---|---|---|
-| `gpt-5.6-terra` | openai | azure | ✅ | — |
-| `gpt-5.6-luna` | openai | azure | ✅ | — |
-| `mistral-large-3` | mistral | azure | ✅ | — |
-| `deepseek-v4-pro` | deepseek | azure | — | — |
-| `deepseek-v4-flash` | deepseek | azure | — | — |
-| `deepseek-r1` | deepseek | azure | — | — |
-| `llama-4-scout` | meta | lmsys | ✅ | — |
-| `llama-4-maverick` | meta | lmsys | ✅ | — |
-| `grok-4.5` | xai | lmsys | ✅ | — |
-| `qwen3.7-plus` | qwen | lmsys | ✅ | — |
-| `minimax-m3` | minimax | lmsys | ✅ | — |
-| `command-a` | cohere | lmsys | ✅ | — |
-| `perplexity-sonar` | perplexity | perplexity | ✅ | — |
-| `claude-sonnet-4-6` | anthropic | azure | ✅ | lifetime |
-| `gemini-3.5-flash-lite` | google | azure | ✅ | lifetime |
-| `kimi-k2.6` | kimi | azure | ✅ | lifetime |
-| `claude-opus-5` | anthropic | azure | ✅ | premium |
-| `claude-sonnet-5` | anthropic | azure | ✅ | premium |
-| `gpt-5.6-sol` | openai | azure | ✅ | premium |
-| `gemini-3.1-pro` | google | azure | ✅ | premium |
-| `grok-4.6` | xai | lmsys | ✅ | premium |
-| `perplexity-sonar-pro` | perplexity | perplexity | ✅ | premium |
-
-`lifetime` = the feed's `lifetimeOnly` flag; those need a lifetime plan but
-are **not** `premiumOnly`, so they are listed by default. Truncated — the feed
-carried 33 chat models when this was written, 12 of them `premiumOnly`.
 
 > Perplexity models return a structured citation list at the end of the
 > stream. The relay strips that raw payload and re-emits the URLs as a
