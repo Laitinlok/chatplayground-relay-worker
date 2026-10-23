@@ -17,6 +17,7 @@ function tool(name: string, properties: Record<string, unknown>): OpenAITool {
 describe("web tool classification", () => {
   it.each([
     ["web-browsing", "query"],
+    ["search_news", "search_query"],
     ["search_web_news", "search_query"],
     ["BROWSING_internet", "query"],
     ["WEB_LOOKUP", "query"],
@@ -41,6 +42,9 @@ describe("web tool classification", () => {
   it("does not mistake conversation search tools for web search", () => {
     expect(
       isSearchTool(tool("agora_search_conversations", { query: { type: "string" } })),
+    ).toBe(false);
+    expect(
+      isSearchTool(tool("search_conversations", { query: { type: "string" } })),
     ).toBe(false);
     expect(
       isSearchTool(tool("search_memories", { search_query: { type: "string" } })),
