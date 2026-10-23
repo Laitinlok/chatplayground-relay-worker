@@ -243,12 +243,19 @@ const ROLE_LABEL: Record<UpstreamMessage["role"], string> = {
 function collapseHistory(messages: UpstreamMessage[]): UpstreamMessage[] {
   if (messages.length === 1) {
     const only = messages[0];
-    return only ? [only] : [{ role: "user", content: "" }];
+    if (!only) return [{ role: "user", content: "" }];
+    // A lone developer message is still not a valid upstream turn role.
+    return [
+      {
+        role: only.role === "system" ? "system" : "user",
+        content: only.content,
+      },
+    ];
   }
 
   const parts: UpstreamContentPart[] = [];
   for (const [index, message] of messages.entries()) {
-    if (index > 0) parts.push({ type: "text", text: "\\n\\n" });
+    if (index > 0) parts.push({ type: "text", text: "\n\n" });
     const label =
       message.role === "user" &&
       typeof message.content === "string" &&
