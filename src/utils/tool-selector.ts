@@ -251,8 +251,18 @@ export async function selectToolForAutoChoice(
   const wantsWebSearch = shouldSearchWeb(userText);
   const isSelectedFetchTool = (name: string) =>
     fetchTools.some((tool) => tool.function.name === name);
-  if (searchTools.length === 0 && fetchTools.length === 0) return null;
-  if (!wantsWebSearch) return null;
+  let candidateTools = request.tools;
+  if (!wantsWebSearch) {
+    // For non-web requests, use embeddings to shortlist a large tool catalog.
+    // This remains advisory: low-confidence matches leave normal model routing
+    // untouched, and the selector still decides whether a tool is needed.
+    if (request.tools.length < 2) return null;
+    const ranked = await rankToolsByEmbedding(userText, request.tools, env.AI);
+    if (!ranked?.confident) return null;
+    candidateTools = ranked.tools.slice(0, 5);
+  } else if (searchTools.length === 0 && fetchTools.length === 0) {
+    return null;
+  }
   const fallbackSearchCall = () =>
     createSearchToolCall(userText, request.tools ?? []);
   const directSearchCall =
@@ -279,7 +289,7 @@ export async function selectToolForAutoChoice(
           "If a search tool and a fetch/scrape tool are available, choose the exact listed search tool first. Never substitute web_search, web_fetch, or another invented name.",
           `Search tools: ${JSON.stringify(searchTools.map((tool) => tool.function.name))}`,
           `Fetch tools: ${JSON.stringify(fetchTools.map((tool) => tool.function.name))}`,
-          `Available tools: ${JSON.stringify(request.tools.map((tool) => tool.function.name))}`,
+          `Available tools: ${JSON.stringify(candidateTools.map((tool) => ({ name: tool.function.name, description: tool.function.description, parameters: tool.function.parameters })))}`,
         ].join("\n"),
       },
       { role: "user", content: latestUserText(request) },
@@ -319,7 +329,7 @@ export async function selectToolForAutoChoice(
       return fallbackSearchCall();
     }
     const markup = `<TOOL_CALL>\ntool: ${decision.name}\nparams:\n${JSON.stringify(decision.arguments)}\n</TOOL_CALL>`;
-    return gateToolCalls(markup, request.tools).calls[0] ?? null;
+    return gateToolCalls(markup, candidateTools).calls[0] ?? null;
   } catch {
     return null;
   }
