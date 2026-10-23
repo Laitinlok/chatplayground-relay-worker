@@ -191,6 +191,18 @@ describe("POST /v1/chat/completions — chatId cache", () => {
     expect(firstKey).toContain(String(Math.floor(start / (60 * 60 * 1000))));
 
     vi.mocked(fetch).mockClear();
+    upstream(() => new Response(`same-hour answer${CHAT_ID}`));
+    const sameHour = await post(hello, {
+      ...env,
+      CHAT_CACHE,
+      CF_VERSION_METADATA: { id: "version-one" },
+    });
+    expect(sameHour.status).toBe(200);
+    expect(JSON.parse(String(chatCall()[1].body)).chatId).toBe(
+      "clm1234567890abcdefgh",
+    );
+
+    vi.mocked(fetch).mockClear();
     upstream(() => new Response(`second answer${CHAT_ID}`));
     vi.spyOn(Date, "now").mockReturnValue(start + 60 * 60 * 1000);
     const nextHour = await post(hello, {
