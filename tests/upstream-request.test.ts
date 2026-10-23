@@ -140,6 +140,7 @@ describe("buildUpstreamRequest — field mapping", () => {
     expect(body.messages).toHaveLength(1);
     expect(body.messages[0]?.content).toHaveLength(15_000);
     expect(body.messages[0]?.content).toContain("earlier context omitted");
+    expect(body.messages[0]?.content).toContain(content.slice(-100));
   });
 
   it("folds developer history into a user message and omits null assistant content", () => {
@@ -171,6 +172,7 @@ describe("buildUpstreamRequest — field mapping", () => {
     expect(body.messages).toHaveLength(1);
     expect(body.messages[0]?.content).toContain("😀b");
     expect(body.messages.some((message) => message.content.includes("�"))).toBe(false);
+    expect(JSON.stringify(body.messages[0]?.content)).toHaveLength(15_000);
   });
 
  it("preserves image_url content parts for upstream vision models", () => {
