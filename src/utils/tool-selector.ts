@@ -251,16 +251,16 @@ export async function selectToolForAutoChoice(
     /\b(?:open|read|fetch|visit|summari[sz]e)\b/i.test(userText)
   )
     return null;
-  const hasSearchResult = false;
   const wantsWebSearch = shouldSearchWeb(userText);
   const isSelectedFetchTool = (name: string) =>
     fetchTools.some((tool) => tool.function.name === name);
   let candidateTools = request.tools;
   if (!wantsWebSearch) {
-    // For non-web requests, use embeddings to shortlist a large tool catalog.
-    // This remains advisory: low-confidence matches leave normal model routing
-    // untouched, and the selector still decides whether a tool is needed.
-    if (request.tools.length < 2) return null;
+    // For non-web requests, use embeddings to shortlist large tool catalogs.
+    // Include every original tool in the final schema gate: the shortlist is
+    // a ranking hint, never authority to widen permissions or alter validation.
+    if (request.tools.length < 2 || request.tools.length > MAX_EMBEDDING_TOOLS)
+      return null;
     const ranked = await rankToolsByEmbedding(userText, request.tools, env.AI);
     if (!ranked?.confident) return null;
     candidateTools = ranked.tools.slice(0, 5);
@@ -345,7 +345,7 @@ export async function selectToolForAutoChoice(
       return fallbackSearchCall();
     }
     const markup = `<TOOL_CALL>\ntool: ${decision.name}\nparams:\n${JSON.stringify(decision.arguments)}\n</TOOL_CALL>`;
-    return gateToolCalls(markup, candidateTools).calls[0] ?? null;
+    return gateToolCalls(markup, request.tools).calls[0] ?? null;
   } catch {
     return null;
   }
