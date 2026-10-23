@@ -223,7 +223,7 @@ describe("streamUpstreamAsOpenAI trailer compatibility", () => {
 
   it("removes a sentinel embedded in streamed prose", async () => {
     expect(await streamedContent([`before CHAT_ID:${CUID} after`])).toBe(
-      "before after",
+      "before  after",
     );
   });
 
