@@ -33,11 +33,16 @@ export async function getModels(env: DiscoveryEnv): Promise<ModelEntry[]> {
     if (fresh.length === 0)
       throw new Error("no chat models in /api/models feed");
     if (env.MODEL_CACHE) {
-      await env.MODEL_CACHE.put(CACHE_KEY, JSON.stringify(fresh), {
-        expirationTtl: KV_TTL_S,
-      });
-    }
-    memCache = { at: Date.now(), data: fresh };
+ try {
+ await env.MODEL_CACHE.put(CACHE_KEY, JSON.stringify(fresh), {
+ expirationTtl: KV_TTL_S,
+ });
+ } catch (err) {
+ // A cache write failure should not turn successful discovery into an error.
+ console.error("Model cache write failed.", err);
+ }
+ }
+ memCache = { at: Date.now(), data: fresh };
     return fresh;
   } catch (err) {
     // No fallback list on purpose. Serving a stale hardcoded registry turned
