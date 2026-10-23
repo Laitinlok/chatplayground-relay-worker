@@ -142,36 +142,36 @@ describe("buildUpstreamRequest — field mapping", () => {
     expect(body.messages[0]?.content).toContain("earlier context omitted");
   });
 
-  it("maps developer messages to system and safely preserves null content", () => {
- const { body } = buildUpstreamRequest(
- {
- model: "gpt-5.5",
- messages: [
- { role: "developer", content: "Follow these rules." },
- { role: "assistant", content: null },
- { role: "user", content: "hi" },
- ],
- },
- AZURE_MODEL,
- );
- expect(body.messages).toEqual([
- {
- role: "user",
- content: "System: Follow these rules.\\n\\nUser: hi",
- },
- ]);
- });
+  it("folds developer history into a user message and omits null assistant content", () => {
+    const { body } = buildUpstreamRequest(
+      {
+        model: "gpt-5.5",
+        messages: [
+          { role: "developer", content: "Follow these rules." },
+          { role: "assistant", content: null },
+          { role: "user", content: "hi" },
+        ],
+      },
+      AZURE_MODEL,
+    );
+    expect(body.messages).toEqual([
+      {
+        role: "user",
+        content: "System: Follow these rules.\\n\\nAssistant:\\n\\nUser: hi",
+      },
+    ]);
+  });
 
- it("does not split a surrogate pair at the upstream message limit", () => {
- const content = "a".repeat(14_999) + "😀" + "b";
- const { body } = buildUpstreamRequest(
- { model: "gpt-5.5", messages: [{ role: "user", content }] },
- AZURE_MODEL,
- );
- expect(body.messages).toHaveLength(1);
- expect(body.messages[0]?.content).toContain("😀b");
- expect(body.messages.some((message) => message.content.includes("�"))).toBe(false);
- });
+  it("keeps surrogate pairs intact while bounding a folded transcript", () => {
+    const content = "a".repeat(14_999) + "😀" + "b";
+    const { body } = buildUpstreamRequest(
+      { model: "gpt-5.5", messages: [{ role: "user", content }] },
+      AZURE_MODEL,
+    );
+    expect(body.messages).toHaveLength(1);
+    expect(body.messages[0]?.content).toContain("😀b");
+    expect(body.messages.some((message) => message.content.includes("�"))).toBe(false);
+  });
 
  it("preserves image_url content parts for upstream vision models", () => {
     const image = {
