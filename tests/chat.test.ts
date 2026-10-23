@@ -56,7 +56,11 @@ function upstream(reply: (url: string) => Response) {
 
 /** The chat route as index.ts mounts it: error envelope + auth in front. */
 // oxlint-disable-next-line typescript/no-explicit-any -- minimal test env stub
-function post(body: unknown, testEnv: any = env) {
+function post(
+  body: unknown,
+  testEnv: any = env,
+  extraHeaders: Record<string, string> = {},
+) {
   // oxlint-disable-next-line typescript/no-explicit-any -- minimal test env stub
   const app = new Hono<any>();
   app.onError(errorHandler);
@@ -69,6 +73,7 @@ function post(body: unknown, testEnv: any = env) {
       headers: {
         authorization: `Bearer ${JWT}`,
         "content-type": "application/json",
+        ...extraHeaders,
       },
       body: typeof body === "string" ? body : JSON.stringify(body),
     },
@@ -755,6 +760,55 @@ describe("POST /v1/chat/completions — non-streaming", () => {
     });
     const body = (await res.json()) as ChatCompletionResponse;
     expect(body.usage.prompt_tokens).toBe(1);
+  });
+});
+
+describe("POST /v1/chat/completions — chatId cache", () => {
+  function chatCache() {
+    const values = new Map<string, string>();
+    return {
+      values,
+      get: vi.fn(async (key: string) => values.get(key) ?? null),
+      put: vi.fn(
+        async (key: string, value: string, _options?: { expirationTtl: number }) => {
+          values.set(key, value);
+        },
+      ),
+    };
+  }
+
+  it("uses cached chatIds only within the same deployment and hour", async () => {
+    const cache = chatCache();
+    const now = 1_800_000_000_000;
+    vi.spyOn(Date, "now").mockReturnValue(now);
+    upstream(() => new Response(`ok${CHAT_ID}`));
+    const testEnv = {
+      ...env,
+      CHAT_CACHE: cache,
+      CF_VERSION_METADATA: { id: "version-a" },
+    };
+    const requestHeaders = { "x-conversation-id": "conversation-1" };
+
+    await post(hello, testEnv, requestHeaders);
+    expect(cache.put).toHaveBeenLastCalledWith(
+      expect.stringContaining("chat:version-a:"),
+      "clm1234567890abcdefgh",
+      { expirationTtl: 60 * 60 },
+    );
+
+    await post(hello, testEnv, requestHeaders);
+    expect(JSON.parse(String(chatCall()[1].body)).chatId).toBe(
+      "clm1234567890abcdefgh",
+    );
+
+    testEnv.CF_VERSION_METADATA = { id: "version-b" };
+    await post(hello, testEnv, requestHeaders);
+    expect(JSON.parse(String(chatCall()[1].body)).chatId).toBe("");
+
+    testEnv.CF_VERSION_METADATA = { id: "version-a" };
+    vi.spyOn(Date, "now").mockReturnValue(now + 60 * 60 * 1000);
+    await post(hello, testEnv, requestHeaders);
+    expect(JSON.parse(String(chatCall()[1].body)).chatId).toBe("");
   });
 });
 
