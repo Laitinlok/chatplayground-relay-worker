@@ -264,11 +264,13 @@ function collapseHistory(messages: UpstreamMessage[]): UpstreamMessage[] {
     }
   }
 
-  const transcript: string | UpstreamContentPart[] = parts.every(
-    (part) => part.type === "text",
-  )
-    ? parts.map((part) => (part as UpstreamContentPartText).text).join("")
-    : parts;
+  const textParts = parts.filter(
+    (part): part is UpstreamContentPartText => part.type === "text",
+  );
+  const transcript: string | UpstreamContentPart[] =
+    textParts.length === parts.length
+      ? textParts.map((part) => part.text).join("")
+      : parts;
   return [{ role: "user", content: boundTranscript(transcript) }];
 }
 
