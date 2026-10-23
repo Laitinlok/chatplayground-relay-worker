@@ -183,7 +183,6 @@ Models the feed marks `premiumOnly` are **hidden from `GET /v1/models` by
  image models with `capabilities: ["image"]` and
  `modalities.output: ["image"]`.
 
-
 Everything else is shown, including models flagged `lifetimeOnly` — see the
 caveats for what that flag is and isn't known to do. Hidden models stay callable
 either way: the filter only changes what the relay advertises, and upstream
