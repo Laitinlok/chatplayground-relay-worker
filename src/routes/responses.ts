@@ -165,20 +165,18 @@ function hostedSearchResponse(
 ): Response {
   const base = chatResultToResponses(model, "", null, messages);
   const withSearch = addHostedWebSearches(base, searches);
-  const output = fallbackCalls.length
-    ? [
-        ...withSearch.output,
-        ...fallbackCalls.flatMap((call) => {
-          const functionCall = chatResultToResponses(
-            model,
-            "",
-            call,
-            messages,
-          ).output.find((item) => item.type === "function_call");
-          return functionCall ? [functionCall] : [];
-        }),
-      ]
-    : withSearch.output.filter((item) => item.type === "web_search_call");
+  const output = [
+    ...withSearch.output.filter((item) => item.type === "web_search_call"),
+    ...fallbackCalls.flatMap((call) => {
+      const functionCall = chatResultToResponses(
+        model,
+        "",
+        call,
+        messages,
+      ).output.find((item) => item.type === "function_call");
+      return functionCall ? [functionCall] : [];
+    }),
+  ];
   const result = { ...withSearch, output, output_text: "" };
   return stream
     ? new Response(streamResponse(result, fallbackCalls[0] ?? null), {
