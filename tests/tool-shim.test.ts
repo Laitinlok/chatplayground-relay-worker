@@ -62,7 +62,46 @@ describe("tryParseRelayToolCall", () => {
     });
   });
 
-  it("rejects a generic search call when multiple advertised search tools are ambiguous", () => {
+  it("recognizes search_news but excludes conversation search from web-search mapping", () => {
+ const searchNews: OpenAITool[] = [
+ {
+ type: "function",
+ function: {
+ name: "search_news",
+ parameters: {
+ type: "object",
+ properties: { query: { type: "string" } },
+ },
+ },
+ },
+ ];
+ expect(
+ gateToolCalls(
+ '<TOOL_CALL>\\ntool: web_search\\nparams: {"query":"latest news"}\\n</TOOL_CALL>',
+ searchNews,
+ ).calls[0]?.function.name,
+ ).toBe("search_news");
+ const conversationSearch: OpenAITool[] = [
+ {
+ type: "function",
+ function: {
+ name: "agora_search_conversations",
+ parameters: {
+ type: "object",
+ properties: { query: { type: "string" } },
+ },
+ },
+ },
+ ];
+ expect(
+ gateToolCalls(
+ '<TOOL_CALL>\\ntool: web_search\\nparams: {"query":"latest news"}\\n</TOOL_CALL>',
+ conversationSearch,
+ ).calls,
+ ).toEqual([]);
+ });
+
+ it("rejects a generic search call when multiple advertised search tools are ambiguous", () => {
     const advertised: OpenAITool[] = ["web_browse", "search_news"].map(
       (name) => ({
         type: "function",
