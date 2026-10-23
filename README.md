@@ -167,10 +167,10 @@ live cookie.
 ### Chat models (auto-discovered)
 
 chatplayground serves chat models from **three upstream endpoints**
-(`azure` / `perplexity` / `lmsys`), routed by model `botId`. The relay mirrors
-that routing automatically, so a single OpenAI `model` field reaches the right
-one. Models chatplayground marks `active:false` are still exposed — that flag
-is UI visibility only, and inactive models remain callable upstream.
+(`azure` / `perplexity` / `lmsys`); each model's feed entry names its endpoint,
+and the relay routes on that field, so a single OpenAI `model` field reaches
+the right one. Models chatplayground marks `active:false` are still exposed —
+that flag is UI visibility only, and inactive models remain callable upstream.
 
 Models the feed marks `premiumOnly` are **hidden from `GET /v1/models` by
  default**, because upstream returns 403 for them without a premium plan; set
@@ -184,12 +184,19 @@ Models the feed marks `premiumOnly` are **hidden from `GET /v1/models` by
  `modalities.output: ["image"]`.
 
 
-including the three models flagged `lifetimeOnly` — see the caveats for what
-that flag is and isn't known to do. Hidden models stay callable either way:
-the filter only changes what the relay advertises, and upstream remains the
-thing that enforces access.
+Everything else is shown, including models flagged `lifetimeOnly` — see the
+caveats for what that flag is and isn't known to do. Hidden models stay callable
+either way: the filter only changes what the relay advertises, and upstream
+remains the thing that enforces access.
 
-Snapshot of the feed (call `GET /v1/models` for the live set):
+Call `GET /v1/models` for the live list. There is deliberately no snapshot
+here: the feed changes regularly, and a copied table rots the same way a
+hardcoded fallback list would (see [Model discovery](#model-discovery)).
+
+`lifetimeOnly` is a separate feed flag; those models need a lifetime plan on
+the web UI but are **not** `premiumOnly`, so they are listed by default.
+
+<!-- Historical model snapshot removed: the upstream feed changes regularly. -->
 
 | Model id (use this in `model` field) | Provider | Endpoint | Vision | Access |
 |---|---|---|---|---|
