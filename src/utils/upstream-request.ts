@@ -243,7 +243,14 @@ function collapseHistory(messages: UpstreamMessage[]): UpstreamMessage[] {
   if (messages.length === 1) {
     const only = messages[0];
     if (!only) return [{ role: "user", content: "" }];
-    return [{ role: "user", content: singleMessageContent(only) }];
+    const content = singleMessageContent(only);
+    if (
+      typeof content === "string" &&
+      content.startsWith("<TOOL_RESULT>")
+    ) {
+      return [{ role: "user", content: `Tool: ${content}` }];
+    }
+    return [{ role: "user", content }];
   }
 
   const parts: UpstreamContentPart[] = [];
@@ -269,7 +276,10 @@ function collapseHistory(messages: UpstreamMessage[]): UpstreamMessage[] {
     textParts.length === parts.length
       ? textParts.map((part) => part.text).join("")
       : parts;
-  return [{ role: "user", content: boundTranscript(transcript) }];
+  return [{
+    role: "user",
+    content: boundTranscript(transcript),
+  }];
 }
 
 /** Preserve a lone message's original payload without adding a transcript label. */
