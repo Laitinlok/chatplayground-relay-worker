@@ -261,10 +261,11 @@ function collapseHistory(messages: UpstreamMessage[]): UpstreamMessage[] {
       message.content.startsWith("<TOOL_RESULT>")
         ? "Tool"
         : ROLE_LABEL[message.role];
-    parts.push({ type: "text", text: `${label}:` });
-    if (typeof message.content === "string") {
-      parts.push({ type: "text", text: ` ${message.content}` });
-    } else {
+    parts.push({
+      type: "text",
+      text: `${label}:${typeof message.content === "string" ? ` ${message.content}` : ""}`,
+    });
+    if (typeof message.content !== "string") {
       parts.push(...message.content);
     }
   }
@@ -319,7 +320,7 @@ function boundTranscript(
   ) {
     ordered[0] = {
       type: "text",
-      text: `${OMITTED_CONTEXT}${ordered[0].text}`,
+      text: `${OMITTED_CONTEXT.replace(/\\\\n$/, "\\n")}${ordered[0].text}`,
     };
   }
   return ordered;
