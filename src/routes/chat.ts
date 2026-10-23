@@ -579,7 +579,8 @@ function estimateUsage(
 }
 
 function textChars(content: OpenAIMessage["content"]): number {
-  if (typeof content === "string") return content.length;
+  if (content === null) return 0;
+ if (typeof content === "string") return content.length;
   if (!Array.isArray(content)) return 0;
   let n = 0;
   for (const part of content) {
