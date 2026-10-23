@@ -33,7 +33,12 @@ function toolParameterNames(tool: OpenAITool): string[] {
 }
 
 function toolNameSuggestsSearch(name: string): boolean {
-  return /(?:web|search|browsing)/i.test(name);
+  const normalized = name.toLowerCase().replace(/[^a-z0-9]+/g, "_");
+  if (/(?:conversation|rag|memory|knowledge|document|vector|semantic)/i.test(normalized))
+    return false;
+  return /(?:^|_)(?:web|search|browsing|duckduckgo|ddg)(?:_|$)/i.test(
+    normalized,
+  );
 }
 
 function toolNameSuggestsFetch(name: string): boolean {
