@@ -233,17 +233,15 @@ function splitUpstreamMessage(
   }
 
   const chunks: UpstreamMessage[] = [];
-  for (
-    let offset = 0;
-    offset < content.length;
-    offset += MAX_UPSTREAM_MESSAGE_CHARS
-  ) {
-    chunks.push({
-      role,
-      content: content.slice(offset, offset + MAX_UPSTREAM_MESSAGE_CHARS),
-    });
-  }
-  return chunks;
+ for (let offset = 0; offset < content.length; ) {
+ let end = Math.min(offset + MAX_UPSTREAM_MESSAGE_CHARS, content.length);
+ // Keep UTF-16 surrogate pairs intact at chunk boundaries.
+ const lastCode = content.charCodeAt(end - 1);
+ if (lastCode >= 0xd800 && lastCode <= 0xdbff) end--;
+ chunks.push({ role, content: content.slice(offset, end) });
+ offset = end;
+ }
+ return chunks;
 }
 
 export function endpointUrl(
