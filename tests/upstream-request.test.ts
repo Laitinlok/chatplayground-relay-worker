@@ -94,9 +94,9 @@ describe("buildUpstreamRequest — field mapping", () => {
     expect(body.messages).toEqual([
       {
         role: "user",
-        content: "hello\n\nDraft so far (do not repeat it):\nHi!",
+        content:
+          "User: hello\n\nDraft so far (do not repeat it):\nHi!\n\nUser: what is an API",
       },
-      { role: "user", content: "what is an API" },
     ]);
     expect(body.chatId).toBe("");
     expect(body.noSave).toBe(true);
@@ -131,18 +131,15 @@ describe("buildUpstreamRequest — field mapping", () => {
     expect(body.botId).toBe("gpt-5.5");
   });
 
-  it("splits messages at the upstream 15,000-character limit", () => {
+  it("folds history to one message within the upstream size limit", () => {
     const content = "a".repeat(15_001);
     const { body } = buildUpstreamRequest(
       { model: "gpt-5.5", messages: [{ role: "user", content }] },
       AZURE_MODEL,
     );
-    expect(body.messages).toHaveLength(2);
+    expect(body.messages).toHaveLength(1);
     expect(body.messages[0]?.content).toHaveLength(15_000);
-    expect(body.messages[1]?.content).toBe("a");
-    expect(body.messages.map((message) => message.content).join("")).toBe(
-      content,
-    );
+    expect(body.messages[0]?.content).toContain("earlier context omitted");
   });
 
   it("maps developer messages to system and safely preserves null content", () => {
@@ -158,8 +155,10 @@ describe("buildUpstreamRequest — field mapping", () => {
  AZURE_MODEL,
  );
  expect(body.messages).toEqual([
- { role: "system", content: "Follow these rules." },
- { role: "user", content: "hi" },
+ {
+ role: "user",
+ content: "System: Follow these rules.\\n\\nUser: hi",
+ },
  ]);
  });
 
@@ -169,9 +168,8 @@ describe("buildUpstreamRequest — field mapping", () => {
  { model: "gpt-5.5", messages: [{ role: "user", content }] },
  AZURE_MODEL,
  );
- expect(body.messages[0]?.content).toHaveLength(14_999);
- expect(body.messages[1]?.content).toBe("😀b");
- expect(body.messages.map((message) => message.content).join("")).toBe(content);
+ expect(body.messages).toHaveLength(1);
+ expect(body.messages[0]?.content).toContain("😀b");
  expect(body.messages.some((message) => message.content.includes("�"))).toBe(false);
  });
 
