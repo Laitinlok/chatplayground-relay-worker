@@ -463,6 +463,7 @@ different upstream instance.
 | `UPSTREAM_ORIGIN` | `https://web.chatplayground.ai` | Forwarded as `Origin` |
 | `UPSTREAM_REFERER` | `https://web.chatplayground.ai/` | Forwarded as `Referer` |
 | `UPSTREAM_UPLOAD_URL` | `https://temp-file-host.chatplayground.ai/upload` | File upload endpoint |
+| `CLERK_FAPI_URL` | `https://clerk.chatplayground.ai` | Clerk frontend API; gateway mode mints session tokens here |
 | `PREMIUM_MODELS` | unset | `"true"` lists `premiumOnly` models in `GET /v1/models`. Leave unset unless the account has premium — upstream 403s them otherwise. Any other value counts as off |
 | `CLOUDFLARE_SEARCH_URL` | unset | Base URL for the configured Cloudflare Search service. The relay sends searches to its `/search` endpoint. |
 | `CLOUDFLARE_SEARCH_TOKEN` | unset | Optional search-service token. If unset, the relay sends no token; the endpoint must permit unauthenticated requests. |
