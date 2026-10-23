@@ -548,6 +548,56 @@ describe("POST /v1/responses — Luna reliability", () => {
     expect(chatCalls).toBe(2);
   });
 
+  it("returns configured Cloudflare Web Search API items in the OpenAI search block", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/api/models")) return Response.json(FEED);
+      if (url.includes("/api/chat/")) {
+        return new Response(`The results cover current AI news.${CHAT_ID}`);
+      }
+      if (url.startsWith("https://search.example.test/")) {
+        return Response.json({
+          items: [
+            {
+              title: "AI News",
+              url: "https://example.test/ai-news",
+              description: "A report about current AI news.",
+            },
+          ],
+          metadata: { query: "latest AI news" },
+        });
+      }
+      return new Response("Unexpected request", { status: 500 });
+    });
+
+    const res = await post(
+      {
+        model: "gpt-6-luna",
+        input: "latest AI news",
+        tools: [{ type: "web_search" }],
+      },
+      { ...env, CLOUDFLARE_SEARCH_URL: "https://search.example.test" },
+    );
+
+    expect(res.status).toBe(200);
+    const payload = (await res.json()) as {
+      output?: Array<{
+        type?: string;
+        results?: Array<{ title?: string; url?: string }>;
+      }>;
+    };
+    const searchCall = payload.output?.find(
+      (item) => item.type === "web_search_call",
+    );
+    expect(searchCall?.results).toEqual([
+      {
+        title: "AI News",
+        url: "https://example.test/ai-news",
+        snippet: "A report about current AI news.",
+      },
+    ]);
+  });
+
   it("performs hosted search for an explicit search prompt without current-events keywords", async () => {
     let chats = 0;
     upstream((url) => {
