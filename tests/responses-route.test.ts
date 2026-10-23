@@ -291,6 +291,43 @@ describe("POST /v1/responses — Luna reliability", () => {
     },
   );
 
+  it("returns a search function on failure without an OpenAI search block or status text", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/api/models")) return Response.json(FEED);
+      if (url.includes("/api/chat/")) {
+        return new Response(`Grounded answer.${CHAT_ID}`);
+      }
+      return new Response("Unavailable", { status: 503 });
+    });
+
+    const res = await post(
+      {
+        model: "gpt-6-luna",
+        input: "Find current AI news",
+        stream: true,
+        tools: [
+          { type: "web_search" },
+          {
+            type: "function",
+            name: "web_browse",
+            parameters: {
+              type: "object",
+              properties: { query: { type: "string" } },
+              required: ["query"],
+            },
+          },
+        ],
+      },
+      { ...env, CLOUDFLARE_SEARCH_URL: "https://search.example.test" },
+    );
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain("web_browse");
+    expect(body).not.toContain("web_search_call");
+    expect(body).not.toContain("OpenAI web search source");
+  });
+
   it("returns a caller's custom search function without starting hosted search", async () => {
     const requests: string[] = [];
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
