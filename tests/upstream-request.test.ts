@@ -145,7 +145,37 @@ describe("buildUpstreamRequest — field mapping", () => {
     );
   });
 
-  it("preserves image_url content parts for upstream vision models", () => {
+  it("maps developer messages to system and safely preserves null content", () => {
+ const { body } = buildUpstreamRequest(
+ {
+ model: "gpt-5.5",
+ messages: [
+ { role: "developer", content: "Follow these rules." },
+ { role: "assistant", content: null },
+ { role: "user", content: "hi" },
+ ],
+ },
+ AZURE_MODEL,
+ );
+ expect(body.messages.slice(0, 2)).toEqual([
+ { role: "system", content: "Follow these rules." },
+ { role: "assistant", content: "" },
+ ]);
+ });
+
+ it("does not split a surrogate pair at the upstream message limit", () => {
+ const content = "a".repeat(14_999) + "😀" + "b";
+ const { body } = buildUpstreamRequest(
+ { model: "gpt-5.5", messages: [{ role: "user", content }] },
+ AZURE_MODEL,
+ );
+ expect(body.messages[0]?.content).toHaveLength(14_999);
+ expect(body.messages[1]?.content).toBe("😀b");
+ expect(body.messages.map((message) => message.content).join("")).toBe(content);
+ expect(body.messages.some((message) => message.content.includes("�"))).toBe(false);
+ });
+
+ it("preserves image_url content parts for upstream vision models", () => {
     const image = {
       type: "image_url" as const,
       image_url: { url: "https://files.example.test/uploaded-photo.png" },
