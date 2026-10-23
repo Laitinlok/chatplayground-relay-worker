@@ -27,38 +27,50 @@ afterEach(() => {
 
 describe("POST /v1/embeddings", () => {
   it("rejects unauthenticated requests with 401", async () => {
-    const res = await app.request("/v1/embeddings", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ input: "hello" }),
-    }, {});
+    const res = await app.request(
+      "/v1/embeddings",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ input: "hello" }),
+      },
+      {},
+    );
     expect(res.status).toBe(401);
   });
 
   it("rejects missing input with 400", async () => {
-    const res = await app.request("/v1/embeddings", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${JWT}`,
+    const res = await app.request(
+      "/v1/embeddings",
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${JWT}`,
+        },
+        body: JSON.stringify({ model: "baai/bge-base-en-v1.5" }),
       },
-      body: JSON.stringify({ model: "baai/bge-base-en-v1.5" }),
-    }, {});
+      {},
+    );
     expect(res.status).toBe(400);
   });
 
   it("returns 503 when Workers AI binding is missing", async () => {
-    const res = await app.request("/v1/embeddings", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${JWT}`,
+    const res = await app.request(
+      "/v1/embeddings",
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${JWT}`,
+        },
+        body: JSON.stringify({
+          input: "hello world",
+          model: "baai/bge-base-en-v1.5",
+        }),
       },
-      body: JSON.stringify({
-        input: "hello world",
-        model: "baai/bge-base-en-v1.5",
-      }),
-    }, {});
+      {},
+    );
     expect(res.status).toBe(503);
   });
 
@@ -73,20 +85,24 @@ describe("POST /v1/embeddings", () => {
     };
 
     // 1. First call: miss cache, calls AI.run
-    const res1 = await app.request("/v1/embeddings", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${JWT}`,
+    const res1 = await app.request(
+      "/v1/embeddings",
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${JWT}`,
+        },
+        body: JSON.stringify({
+          input: ["hello", "world"],
+          model: "baai/bge-base-en-v1.5",
+        }),
       },
-      body: JSON.stringify({
-        input: ["hello", "world"],
-        model: "baai/bge-base-en-v1.5",
-      }),
-    }, env);
+      env,
+    );
 
     expect(res1.status).toBe(200);
-    const json1 = await res1.json() as any;
+    const json1 = (await res1.json()) as any;
     expect(json1.object).toBe("list");
     expect(json1.data).toHaveLength(2);
     expect(json1.data[0].embedding).toEqual([0.1, 0.2, 0.3]);
@@ -95,20 +111,24 @@ describe("POST /v1/embeddings", () => {
 
     // 2. Second call: hits cache
     runMock.mockClear();
-    const res2 = await app.request("/v1/embeddings", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${JWT}`,
+    const res2 = await app.request(
+      "/v1/embeddings",
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${JWT}`,
+        },
+        body: JSON.stringify({
+          input: "hello",
+          model: "baai/bge-base-en-v1.5",
+        }),
       },
-      body: JSON.stringify({
-        input: "hello",
-        model: "baai/bge-base-en-v1.5",
-      }),
-    }, env);
+      env,
+    );
 
     expect(res2.status).toBe(200);
-    const json2 = await res2.json() as any;
+    const json2 = (await res2.json()) as any;
     expect(json2.data[0].embedding).toEqual([0.1, 0.2, 0.3]);
     expect(runMock).not.toHaveBeenCalled();
   });

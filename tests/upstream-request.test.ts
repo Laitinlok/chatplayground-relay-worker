@@ -3,8 +3,10 @@ import { toEndpoint } from "../src/constants/endpoints";
 import type { ModelEntry } from "../src/constants/models";
 import type { ChatCompletionRequest } from "../src/types/openai";
 import {
+  buildUpstreamHeaders,
   buildUpstreamRequest,
   endpointUrl,
+  requiresNewPromptOnly,
 } from "../src/utils/upstream-request";
 
 const AZURE_MODEL: ModelEntry = {
@@ -12,6 +14,24 @@ const AZURE_MODEL: ModelEntry = {
   modelName: "gpt-5.5",
   upstreamModel: "openai/gpt-5.5",
   upstreamBotId: "gpt-5.5",
+  provider: "openai",
+  endpoint: "azure",
+};
+
+const LUNA_MODEL: ModelEntry = {
+  id: "gpt-6-luna",
+  modelName: "gpt-6-luna",
+  upstreamModel: "openai/gpt-6-luna",
+  upstreamBotId: "gpt-6-luna",
+  provider: "openai",
+  endpoint: "azure",
+};
+
+const AGENT_MODEL: ModelEntry = {
+  id: "gpt-agent",
+  modelName: "gpt-agent",
+  upstreamModel: "openai/gpt-agent",
+  upstreamBotId: "gpt-agent",
   provider: "openai",
   endpoint: "azure",
 };
@@ -38,6 +58,69 @@ const LMSYS_MODEL: ModelEntry = {
 const AZURE_BASE_URL = "https://app.chatplayground.ai/api/chat/azure";
 
 describe("buildUpstreamRequest — field mapping", () => {
+  it("sends only the latest user prompt to agent models", () => {
+    const { body } = buildUpstreamRequest(
+      {
+        model: "gpt-agent",
+        user: "client-chat-id",
+        messages: [
+          { role: "system", content: "System instructions stay client-side." },
+          { role: "user", content: "Previous question" },
+          { role: "assistant", content: "Previous answer" },
+          { role: "user", content: "Current prompt" },
+        ],
+      },
+      AGENT_MODEL,
+    );
+
+    expect(body.messages).toEqual([{ role: "user", content: "Current prompt" }]);
+    expect(body.chatId).toBe("client-chat-id");
+    expect(body.noSave).toBe(true);
+  });
+
+  it("sends only the latest user prompt and keeps Luna noSave enabled", () => {
+    const { body } = buildUpstreamRequest(
+      {
+        model: "gpt-6-luna",
+        messages: [
+          { role: "user", content: "hello" },
+          { role: "assistant", content: "Hi!" },
+          { role: "user", content: "what is an API" },
+        ],
+      },
+      LUNA_MODEL,
+    );
+
+    expect(body.messages).toEqual([
+      {
+        role: "user",
+        content: "hello\n\nDraft so far (do not repeat it):\nHi!",
+      },
+      { role: "user", content: "what is an API" },
+    ]);
+    expect(body.chatId).toBe("");
+    expect(body.noSave).toBe(true);
+    expect(body.submissionId).toMatch(/^[0-9a-f-]{36}$/i);
+  });
+
+  it("sends only the new user prompt when resuming an upstream chat", () => {
+    const { body } = buildUpstreamRequest(
+      {
+        model: "gpt-5.5",
+        user: "cmvjv8i7d002pl708e4uhhyyh",
+        messages: [
+          { role: "user", content: "hello" },
+          { role: "assistant", content: "Hi!" },
+          { role: "user", content: "what is an API" },
+        ],
+      },
+      AZURE_MODEL,
+    );
+
+    expect(body.messages).toEqual([{ role: "user", content: "what is an API" }]);
+    expect(body.chatId).toBe("cmvjv8i7d002pl708e4uhhyyh");
+  });
+
   it("defaults to noSave=true and empty chatId", () => {
     const { body } = buildUpstreamRequest(
       { model: "gpt-5.5", messages: [{ role: "user", content: "hi" }] },
@@ -94,7 +177,6 @@ describe("buildUpstreamRequest — field mapping", () => {
     ]);
   });
 
-
   it("keeps edit tools available after a tool result on continue turns", () => {
     const { body } = buildUpstreamRequest(
       {
@@ -108,25 +190,63 @@ describe("buildUpstreamRequest — field mapping", () => {
               {
                 id: "call_1",
                 type: "function",
-                function: { name: "read_file", arguments: '{"filepath":"a.js"}' },
+                function: {
+                  name: "read_file",
+                  arguments: '{"filepath":"a.js"}',
+                },
               },
             ],
           },
           { role: "tool", content: "file contents" },
         ],
         tools: [
-          { type: "function", function: { name: "read_file", parameters: { type: "object", properties: {} } } },
-          { type: "function", function: { name: "edit_existing_file", parameters: { type: "object", properties: {} } } },
+          {
+            type: "function",
+            function: {
+              name: "read_file",
+              parameters: { type: "object", properties: {} },
+            },
+          },
+          {
+            type: "function",
+            function: {
+              name: "edit_existing_file",
+              parameters: { type: "object", properties: {} },
+            },
+          },
         ],
       },
       AZURE_MODEL,
     );
     const systemNotes = body.messages
       .filter((message: { role: string }) => message.role === "system")
-      .map((message: { content: string }) => String(message.content))
+      .map((message) => String(message.content))
       .join("\n");
-    expect(systemNotes).toMatch(/Continue the user's task|edit\/write\/replace/i);
+    expect(systemNotes).toMatch(
+      /Continue the user's task|edit\/write\/replace/i,
+    );
     expect(systemNotes).not.toMatch(/Do not announce another search/i);
+  });
+
+  it("allows another tool call after a tool result", () => {
+    const { body } = buildUpstreamRequest(
+      {
+        model: "gpt-5.5",
+        messages: [
+          { role: "user", content: "Create a report from search results." },
+          { role: "tool", content: "Search results" },
+        ],
+        tools: [{ type: "function", function: { name: "create_document" } }],
+      },
+      AZURE_MODEL,
+    );
+    const transcript = body.messages
+      .map((message) => String(message.content))
+      .join("\n");
+    expect(transcript).toContain(
+      "If an edit/write/replace tool is still needed",
+    );
+    expect(transcript).not.toContain("Do not announce another search");
   });
 
   it("serializes tool-call history using the injected text protocol", () => {
@@ -223,7 +343,9 @@ describe("buildUpstreamRequest — per-endpoint body shape", () => {
       "modelName",
       "noSave",
       "promptTemplate",
+      "submissionId",
     ]);
+    expect(body.submissionId).toMatch(/^[0-9a-f-]{36}$/i);
     expect(body).toMatchObject({
       modelName: "sonar-pro",
       apiKey: null,
@@ -252,6 +374,31 @@ describe("toEndpoint", () => {
   it("defaults unknown endpoint values to lmsys", () => {
     expect(toEndpoint("something-new")).toBe("lmsys");
     expect(toEndpoint("")).toBe("lmsys");
+  });
+});
+
+describe("requiresNewPromptOnly", () => {
+  it("treats Grok models as prompt-only agents", () => {
+    const grok = { ...AZURE_MODEL, id: "xai/grok-4.7", modelName: "grok-4.7" };
+    expect(requiresNewPromptOnly(grok)).toBe(true);
+  });
+});
+
+describe("buildUpstreamHeaders", () => {
+  it("matches the browser request headers without altering authorization", () => {
+    const headers = new Headers(
+      buildUpstreamHeaders("session-token", {
+        UPSTREAM_ORIGIN: "https://web.example.test",
+        UPSTREAM_REFERER: "https://web.example.test/",
+      }),
+    );
+    expect(headers.get("content-type")).toBe("application/json");
+    expect(headers.get("authorization")).toBe("Bearer session-token");
+    expect(headers.get("origin")).toBe("https://web.example.test");
+    expect(headers.get("referer")).toBe("https://web.example.test/");
+    expect(headers.get("user-agent")).toContain("Chrome/155.0.0.0");
+    expect(headers.get("sec-ch-ua")).toContain('"Brave"');
+    expect(headers.get("accept-language")).toBe("en-US,en;q=0.9");
   });
 });
 

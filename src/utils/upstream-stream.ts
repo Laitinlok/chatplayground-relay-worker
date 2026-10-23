@@ -7,7 +7,10 @@ import {
   type OpenAITool,
   type ShimToolCall,
 } from "./tool-shim";
-import { resolveCitationTitles, type CitationTitleMap } from "./citation-titles";
+import {
+  resolveCitationTitles,
+  type CitationTitleMap,
+} from "./citation-titles";
 
 // chatplayground appends `CHAT_ID:<cuid>` at the very end of the stream as a
 // sentinel. CUID format: `c` + ≥20 chars of [a-z0-9]. We strip it before
@@ -102,8 +105,13 @@ export function formatCitations(
 ): string {
   if (citations.length === 0) return "";
   const lines = citations.map((url, i) => {
-    const title = (titles?.get(url) ?? citationTitle(url)).replace(/[\\[\\]\\]/g, "\\\\$&");
-    const safeUrl = url.replace(/[()\\]/g, (character) => encodeURIComponent(character));
+    const title = (titles?.get(url) ?? citationTitle(url)).replace(
+      /[\\[\\]\\]/g,
+      "\\\\$&",
+    );
+    const safeUrl = url.replace(/[()\\]/g, (character) =>
+      encodeURIComponent(character),
+    );
     return `${i + 1}. [${title}](${safeUrl})`;
   });
   return `\n\n---\n**Sources**\n\n${lines.join("\n")}`;
@@ -113,7 +121,10 @@ export async function formatCitationsWithTitles(
   citations: readonly string[],
   options?: { searchUrl?: string; searchToken?: string },
 ): Promise<string> {
-  return formatCitations(citations, await resolveCitationTitles(citations, options));
+  return formatCitations(
+    citations,
+    await resolveCitationTitles(citations, options),
+  );
 }
 
 const INLINE_CITATION_RE = /\[(\d+)\]/g;
@@ -132,7 +143,9 @@ export function inlineCitationLinks(
     const idx = Number(idxStr);
     const url = citations[idx - 1];
     if (!url) return match;
-    const safeUrl = url.replace(/[()\\]/g, (character) => encodeURIComponent(character));
+    const safeUrl = url.replace(/[()\\]/g, (character) =>
+      encodeURIComponent(character),
+    );
     return `[\\[${idx}\\]](${safeUrl})`;
   });
 }
@@ -400,9 +413,9 @@ export function streamUpstreamWithToolShim(
         const toolCall = tryParseRelayToolCall(content, meta.tools);
 
         if (toolCall) {
-          // Role + empty content first, then tool_calls, then finish_reason.
-          // Agora retries when the tool-call envelope looks incomplete.
-          controller.enqueue(sse({ role: "assistant", content: "" }));
+          // Tool-only streaming turns should not send an empty content delta:
+          // some OpenAI-compatible clients treat it as a completed blank reply.
+          controller.enqueue(sse({ role: "assistant" }));
           controller.enqueue(
             sse({
               tool_calls: [
@@ -426,15 +439,15 @@ export function streamUpstreamWithToolShim(
           }
           const visibleContent = split.content || split.reasoningContent;
           const titles = await resolveCitationTitles(citations, {
-          searchUrl: meta.searchUrl,
-          searchToken: meta.searchToken,
-        });
-        const answer =
-          (split.reasoningContent && split.content
-            ? `<think>\n${split.reasoningContent}\n</think>\n`
-            : "") +
-          visibleContent +
-          formatCitations(citations, titles);
+            searchUrl: meta.searchUrl,
+            searchToken: meta.searchToken,
+          });
+          const answer =
+            (split.reasoningContent && split.content
+              ? `<think>\n${split.reasoningContent}\n</think>\n`
+              : "") +
+            visibleContent +
+            formatCitations(citations, titles);
           if (answer) controller.enqueue(sse({ content: answer }));
           controller.enqueue(sse({}, "stop"));
         }

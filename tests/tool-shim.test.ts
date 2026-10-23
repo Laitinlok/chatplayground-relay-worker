@@ -3,6 +3,7 @@ import {
   buildToolSystemPrompt,
   gateToolCalls,
   injectReasoningPrompt,
+  injectToolPrompt,
   normalizeOpenAITools,
   stripToolCallMarkup,
   toolCallRetrySignal,
@@ -15,7 +16,72 @@ const tools: OpenAITool[] = [
   { type: "function", function: { name: "web_search" } },
 ];
 
+describe("tool prompt updates", () => {
+  it("replaces the relay policy and tool catalog while preserving caller instructions", () => {
+    const first = injectToolPrompt(
+      [{ role: "system", content: "Be concise." }],
+      [tools[1]!],
+      {
+        type: "function",
+        function: { name: "web_search" },
+      },
+    );
+    const next = injectToolPrompt(first, tools, "required");
+    const prompt = String(next[0]?.content);
+    expect(prompt).toContain("Be concise.");
+    expect(prompt).toContain("You must call exactly one listed tool.");
+    expect(prompt).toContain("## cron");
+    expect(prompt).not.toContain('You must call the tool named "web_search".');
+    expect(prompt.match(/\[relay-tool-prompt-v1\]/g)).toHaveLength(1);
+  });
+});
+
 describe("tryParseRelayToolCall", () => {
+  it("maps a generic search call to the one advertised search tool and its query parameter", () => {
+    const advertised: OpenAITool[] = [
+      {
+        type: "function",
+        function: {
+          name: "web_browse",
+          parameters: {
+            type: "object",
+            properties: { search_query: { type: "string" } },
+            required: ["search_query"],
+          },
+        },
+      },
+    ];
+    const result = gateToolCalls(
+      '<TOOL_CALL>\ntool: web_search\nparams: {"query":"latest recipes"}\n</TOOL_CALL>',
+      advertised,
+    );
+    expect(result.rejections).toEqual([]);
+    expect(result.calls[0]?.function).toEqual({
+      name: "web_browse",
+      arguments: '{"search_query":"latest recipes"}',
+    });
+  });
+
+  it("rejects a generic search call when multiple advertised search tools are ambiguous", () => {
+    const advertised: OpenAITool[] = ["web_browse", "search_news"].map(
+      (name) => ({
+        type: "function",
+        function: {
+          name,
+          parameters: {
+            type: "object",
+            properties: { query: { type: "string" } },
+          },
+        },
+      }),
+    );
+    const result = gateToolCalls(
+      '<TOOL_CALL>\ntool: web_search\nparams: {"query":"news"}\n</TOOL_CALL>',
+      advertised,
+    );
+    expect(result.calls).toEqual([]);
+    expect(result.rejections[0]).toContain("Unknown tool");
+  });
   it("parses params JSON that contains braces inside string values", () => {
     const tools: OpenAITool[] = [
       {
@@ -101,12 +167,20 @@ params:
     );
     expect(missing.calls).toEqual([]);
     expect(missing.rejections[0]).toContain("missing required");
-    expect(toolCallRetrySignal(missing.rejections)).toContain("rejected by the tool gate");
+    expect(toolCallRetrySignal(missing.rejections)).toContain(
+      "rejected by the tool gate",
+    );
   });
 
   it("keeps valid calls and drops only the invalid ones", () => {
     const tools: OpenAITool[] = [
-      { type: "function", function: { name: "cron", parameters: { type: "object", properties: {} } } },
+      {
+        type: "function",
+        function: {
+          name: "cron",
+          parameters: { type: "object", properties: {} },
+        },
+      },
       {
         type: "function",
         function: {
@@ -134,7 +208,9 @@ params:
       tools,
     );
     expect(gated.calls.map((call) => call.function.name)).toEqual(["cron"]);
-    expect(gated.rejections.some((reason) => reason.includes("web_search"))).toBe(true);
+    expect(
+      gated.rejections.some((reason) => reason.includes("web_search")),
+    ).toBe(true);
   });
 
   it("parses the xml tool block", () => {
@@ -167,7 +243,7 @@ params:
   it("rejects a tool that is not listed", () => {
     expect(
       tryParseRelayToolCall(
-        '<TOOL_CALL>\ntool: unknown\nparams:\n{}\n</TOOL_CALL>',
+        "<TOOL_CALL>\ntool: unknown\nparams:\n{}\n</TOOL_CALL>",
         tools,
       ),
     ).toBeNull();
@@ -186,11 +262,22 @@ params:
     ]);
   });
 
-  it("normalizes OpenAI built-in web search for the relay tool shim", () => {
+  it("preserves web_search for Chat Completions normalization", () => {
     expect(
       normalizeOpenAITools([{ type: "web_search_preview" }]),
     ).toMatchObject([
       { type: "function", function: { name: "web_search" } },
+      { type: "function", function: { name: "web_fetch" } },
+    ]);
+  });
+
+  it("preserves web_search_preview only for Responses normalization", () => {
+    expect(
+      normalizeOpenAITools([{ type: "web_search_preview" }], {
+        preserveWebSearchPreview: true,
+      }),
+    ).toMatchObject([
+      { type: "function", function: { name: "web_search_preview" } },
       { type: "function", function: { name: "web_fetch" } },
     ]);
   });
@@ -212,6 +299,37 @@ params:
       "medium",
     );
     expect(injectReasoningPrompt(first, "high")).toEqual(first);
+  });
+
+  it("strips image-generation wording and retains the subject for prompt refinement", () => {
+    const messages = injectToolPrompt(
+      [{ role: "user", content: "Please generate an image of a large cafe." }],
+      [
+        {
+          type: "function",
+          function: { name: "generate_image" },
+        },
+      ],
+      "auto",
+    );
+    expect(messages.at(-1)?.content).toBe("a large cafe");
+    expect(messages[0]?.content).toContain(
+      "improve it into a polished, descriptive image prompt",
+    );
+    expect(messages[0]?.content).toContain(
+      "do not answer with a refusal or claim image generation is unavailable",
+    );
+  });
+
+  it("does not rewrite image requests when generate_image is not advertised", () => {
+    const messages = injectToolPrompt(
+      [{ role: "user", content: "Please generate an image of a large cafe." }],
+      [{ type: "function", function: { name: "create_document" } }],
+      "auto",
+    );
+    expect(messages.at(-1)?.content).toBe(
+      "Please generate an image of a large cafe.",
+    );
   });
 
   it("injects a compact catalog with required parameter guidance", () => {
@@ -246,5 +364,3 @@ params:
     expect(prompt).toContain("<TOOL_CALL>");
   });
 });
-
-

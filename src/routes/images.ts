@@ -3,12 +3,23 @@ import type { Env, Variables } from "../types/env";
 import { invalidRequest, upstreamError } from "../utils/errors";
 import { findModel } from "../utils/model-id";
 import { getModels } from "../utils/model-discovery";
-
 const images = new Hono<{ Bindings: Env; Variables: Variables }>();
 
 const IMAGE_CACHE_TTL_SECONDS = 60 * 60 * 24; // 24h
 const IMAGE_DOWNLOAD_TIMEOUT_MS = 30_000;
+const MAX_IMAGE_PROMPT_CHARS = 4_000;
 const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
+const AGORA_TAG_RE = /<\/?ag(?:o|io)ra_[^>]*>/gi;
+const AGORA_METADATA_RE = /\b(?:sent_date|sent_at|message_id)\s*=\s*[^\s>]+/gi;
+
+function normalizeImagePrompt(value: string): string {
+  return value
+    .replace(AGORA_TAG_RE, "")
+    .replace(AGORA_METADATA_RE, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, MAX_IMAGE_PROMPT_CHARS);
+}
 
 interface ImageGenerationRequest {
   prompt: string;
@@ -81,7 +92,7 @@ async function downloadImage(
   }
 }
 
-async function removeUpstreamImage(
+async function deleteUpstreamImage(
   chatUrl: string,
   modelName: string,
   imageId: string,
@@ -104,11 +115,11 @@ async function removeUpstreamImage(
       signal: AbortSignal.timeout(15_000),
     });
   } catch {
-    // Best-effort history cleanup. The cached/local copy is already safe.
+    // Cleanup is best-effort. The image has already been downloaded, so a
+    // cleanup failure must never turn a successful generation into an error.
   }
 }
 
-/** Serve a previously cached generation. Auth required via /v1/*. */
 images.get("/v1/images/cached/:id", async (c) => {
   const id = c.req.param("id");
   if (!id || !/^[A-Za-z0-9_-]+$/.test(id)) {
@@ -149,11 +160,18 @@ images.post("/v1/images/generations", async (c) => {
     throw invalidRequest("Missing or empty required field 'prompt'.");
   }
 
+  const prompt = normalizeImagePrompt(body.prompt);
+  if (!prompt) {
+    throw invalidRequest("Missing or empty required field 'prompt'.", "prompt");
+  }
+
   const modelId = body.model || "gpt-image-2.5-sunburst";
   const registry = await getModels(c.env);
   const model = findModel(modelId, registry);
   if (model && model.endpoint !== "image") {
-    throw invalidRequest(`Model '${modelId}' is not an image generation model.`);
+    throw invalidRequest(
+      `Model '${modelId}' is not an image generation model.`,
+    );
   }
 
   const upstreamModelName = model ? model.modelName : modelId;
@@ -165,7 +183,7 @@ images.post("/v1/images/generations", async (c) => {
   const sessionToken = await c.get("sessionToken")();
 
   const upstreamBody = {
-    prompt: body.prompt,
+    prompt,
     apiKey: null,
     model: upstreamModelName,
     size: body.size || "auto",
@@ -205,29 +223,32 @@ images.post("/v1/images/generations", async (c) => {
     );
   }
 
-  const imageId =
-    typeof result.id === "string" && result.id.trim()
-      ? result.id.trim()
-      : crypto.randomUUID().replace(/-/g, "");
+  const wantB64 = body.response_format === "b64_json";
+  // Preserve the normal OpenAI image contract for Agora: URL responses avoid
+  // embedding a large base64 payload in the tool response, which can trigger
+  // upstream/client 413 errors. Keep the upstream asset alive for URL users.
+  if (!wantB64) {
+    return c.json({
+      created: Math.floor(Date.now() / 1000),
+      data: [
+        {
+          url: result.url,
+          revised_prompt: result.prompt ?? prompt,
+        },
+      ],
+    });
+  }
+
   const downloaded = await downloadImage(result.url);
   if (!downloaded) {
     throw upstreamError(502, "Failed to download the generated image.");
   }
 
   const base64 = bytesToBase64(downloaded.bytes);
-  if (c.env.CHAT_CACHE) {
-    const payload: CachedImage = {
-      contentType: downloaded.contentType,
-      base64,
-    };
-    await c.env.CHAT_CACHE.put(cacheKey(imageId), JSON.stringify(payload), {
-      expirationTtl: IMAGE_CACHE_TTL_SECONDS,
-    });
-  }
-
-  // noSave does not clear image history. Delete upstream after we hold a copy.
+  // Only delete an asset after the b64 response has been materialized. URL
+  // responses must not delete the upstream object before the client fetches it.
   if (result.id) {
-    await removeUpstreamImage(
+    await deleteUpstreamImage(
       chatUrl,
       upstreamModelName,
       result.id,
@@ -236,25 +257,11 @@ images.post("/v1/images/generations", async (c) => {
     );
   }
 
-  const wantB64 = body.response_format === "b64_json" || !c.env.CHAT_CACHE;
-  if (wantB64) {
-    return c.json({
-      created: Math.floor(Date.now() / 1000),
-      data: [
-        {
-          b64_json: base64,
-          revised_prompt: result.prompt ?? body.prompt,
-        },
-      ],
-    });
-  }
-
-  const origin = new URL(c.req.url).origin;
   return c.json({
     created: Math.floor(Date.now() / 1000),
     data: [
       {
-        url: `${origin}/v1/images/cached/${encodeURIComponent(imageId)}`,
+        b64_json: base64,
         revised_prompt: result.prompt ?? body.prompt,
       },
     ],

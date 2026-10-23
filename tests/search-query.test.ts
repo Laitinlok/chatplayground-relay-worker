@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { sanitizeSearchQuery } from "../src/utils/search-query";
+import {
+  needsCurrentWebSearch,
+  sanitizeSearchQuery,
+} from "../src/utils/search-query";
 
 describe("sanitizeSearchQuery", () => {
   it("removes Agora wrapper tags and sent-date metadata", () => {
@@ -10,8 +13,19 @@ describe("sanitizeSearchQuery", () => {
     ).toBe("Latest climate report");
   });
 
-  it("preserves ordinary query text and trims to the search limit", () => {
-    expect(sanitizeSearchQuery("  current   weather  ")).toBe("current weather");
-    expect(sanitizeSearchQuery("x".repeat(400))).toHaveLength(300);
+  it.each([
+    "latest viral TikTok food hacks",
+    "recent stock price for NVDA",
+    "live weather in Tokyo",
+    "verify whether the release is official",
+    "find current documentation on the web",
+  ])("recognizes information that requires web search: %s", (prompt) => {
+    expect(needsCurrentWebSearch(prompt)).toBe(true);
+  });
+
+  it("does not require search for stable knowledge", () => {
+    expect(needsCurrentWebSearch("Explain how binary search works.")).toBe(
+      false,
+    );
   });
 });

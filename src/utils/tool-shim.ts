@@ -16,20 +16,73 @@ interface FlatFunctionTool {
   parameters?: unknown;
 }
 
+function toolParameterNames(tool: OpenAITool): string[] {
+  const parameters = tool.function.parameters;
+  if (
+    !parameters ||
+    typeof parameters !== "object" ||
+    Array.isArray(parameters)
+  )
+    return [];
+  const properties = (parameters as { properties?: unknown }).properties;
+  return properties &&
+    typeof properties === "object" &&
+    !Array.isArray(properties)
+    ? Object.keys(properties)
+    : [];
+}
+
+function toolNameSuggestsSearch(name: string): boolean {
+  return /(?:web|search|browsing)/i.test(name);
+}
+
+function toolNameSuggestsFetch(name: string): boolean {
+  return /(?:web|fetch|scrap|crawl|open|read)/i.test(name);
+}
+
+function isSearchTool(tool: OpenAITool): boolean {
+  const parameters = toolParameterNames(tool);
+  return (
+    toolNameSuggestsSearch(tool.function.name) &&
+    (parameters.includes("query") || parameters.includes("search_query"))
+  );
+}
+
+function isFetchTool(tool: OpenAITool): boolean {
+  return (
+    toolNameSuggestsFetch(tool.function.name) &&
+    toolParameterNames(tool).includes("url")
+  );
+}
+export interface NormalizeToolOptions {
+  preserveWebSearchPreview?: boolean;
+}
+
 /** Normalize Chat Completions and Responses-style function tool definitions. */
-export function normalizeOpenAITools(tools: unknown): OpenAITool[] {
+export function normalizeOpenAITools(
+  tools: unknown,
+  options: NormalizeToolOptions = {},
+): OpenAITool[] {
   if (!Array.isArray(tools)) return [];
   return tools.flatMap((tool): OpenAITool[] => {
     if (!tool || typeof tool !== "object") return [];
     const candidate = tool as Record<string, unknown>;
-    if (candidate.type === "web_search_preview" || candidate.type === "web_search") {
+    if (
+      candidate.type === "web_search_preview" ||
+      candidate.type === "web_search"
+    ) {
       return [
         {
           type: "function",
           function: {
-            name: "web_search",
-            description:
-              "Search the web for a specific query. Choose max_results based on the evidence needed, from 1 to 50.",
+            name:
+              candidate.type === "web_search_preview" &&
+              options.preserveWebSearchPreview
+                ? "web_search_preview"
+                : "web_search",
+            description: options.preserveWebSearchPreview
+              ? "Search current or external information. Use for latest, recent, today, news, live data, or facts that may have changed."
+              : "Search current or external information when the prompt asks for latest, recent, today, news, live data, or facts that may have changed. Otherwise answer directly.",
             parameters: {
               type: "object",
               properties: {
@@ -50,11 +103,14 @@ export function normalizeOpenAITools(tools: unknown): OpenAITool[] {
           function: {
             name: "web_fetch",
             description:
-              "Retrieve the full text for a URL returned by a previous web_search call. Use this to inspect a promising result before answering.",
+              "Fetch a relevant URL returned by web_search. Use this only when the search snippets are insufficient; do not use it as the first web tool.",
             parameters: {
               type: "object",
               properties: {
-                url: { type: "string", description: "URL from a search result" },
+                url: {
+                  type: "string",
+                  description: "URL from a search result",
+                },
               },
               required: ["url"],
             },
@@ -131,7 +187,6 @@ const TOOL_PROMPT_SENTINEL = "[relay-tool-prompt-v1]";
 const REASONING_PROMPT_SENTINEL = "[relay-reasoning-prompt-v1]";
 const TOOL_NAME_ALIASES: Record<string, string[]> = {
   cron: ["schedule", "scheduler", "reminder", "create_reminder", "cron_add"],
-  web_search: ["web.run", "web_search_preview", "browser.search", "search"],
 };
 
 function normalizeName(value: string): string {
@@ -185,6 +240,13 @@ function resolveToolName(
     (candidate) => candidate.normalized === normalized,
   );
   if (exact) return exact.name;
+
+  // Models sometimes emit the generic web_search name instead of the client
+  // tool. Bind it only when there is exactly one unambiguous search tool.
+  if (normalized === "web_search" || normalized === "web_search_preview") {
+    const searchTools = tools.filter(isSearchTool);
+    return searchTools.length === 1 ? searchTools[0]!.function.name : null;
+  }
 
   const alias = candidates.find((candidate) =>
     (TOOL_NAME_ALIASES[candidate.normalized] ?? []).some(
@@ -245,9 +307,26 @@ export function buildToolSystemPrompt(
           ? `You must call the tool named "${forcedName}".`
           : "Call a tool only when its result is required. Otherwise answer directly.";
 
+  const searchNames = tools
+    .filter(isSearchTool)
+    .map((tool) => tool.function.name);
+  const fetchNames = tools
+    .filter(isFetchTool)
+    .map((tool) => tool.function.name);
+  const searchInstruction =
+    searchNames.length > 0
+      ? `Use the listed search tool (${searchNames.join(", ")}) for web research. Do not invent web_search or any other tool name.`
+      : "Do not invent a web search tool.";
+  const fetchInstruction =
+    fetchNames.length > 0
+      ? `Use the listed fetch tool (${fetchNames.join(", ")}) to read a URL supplied by the user or returned by search. Do not invent web_fetch or any other tool name.`
+      : "Do not invent a fetch tool.";
   const catalog = tools
     .map((tool) => {
-      const schema = tool.function.parameters ?? { type: "object", properties: {} };
+      const schema = tool.function.parameters ?? {
+        type: "object",
+        properties: {},
+      };
       return [
         `## ${tool.function.name}`,
         `- description: ${tool.function.description ?? ""}`,
@@ -263,10 +342,14 @@ export function buildToolSystemPrompt(
     "1. Each reply is in exactly one state.",
     "   A. Need one or more tools -> output one <TOOL_CALL> block per tool, then stop. More calls are allowed after a <TOOL_RESULT>, including edit/write/replace tools on continue turns.",
     "   B. Task finished -> follow the caller's system instructions and answer in full from every <TOOL_RESULT> above. No tool block.",
-    "2. Forbidden:",
+    "2. Search priority:",
+    `   - ${searchInstruction}`,
+    `   - ${fetchInstruction}`,
+    "   - Search and fetch tools are optional when the request does not need current or external information.",
+    "3. Forbidden:",
     "   - Do not write a <TOOL_RESULT> block. The host returns the real result next turn.",
     "   - Do not invent a tool that is not listed.",
-    "   - Do not say you will call a tool, that search is unavailable, or ask the user for a link instead of calling web_search.",
+    "   - Do not say you will call a tool, that search is unavailable, or ask the user for a link instead of calling the listed search tool.",
     "3. The block format is exactly:",
     "<TOOL_CALL>",
     "tool: tool_name",
@@ -275,6 +358,9 @@ export function buildToolSystemPrompt(
     "</TOOL_CALL>",
     "4. params is one JSON object. Include every required field.",
     policy,
+    tools.some((tool) => tool.function.name === "generate_image")
+      ? "When the user requests image generation, treat their message as the subject brief, improve it into a polished, descriptive image prompt, then call generate_image with that improved prompt. Preserve requested subjects, style, composition, and constraints. Do not include the user's request wording such as 'please generate an image of', do not answer with a refusal or claim image generation is unavailable, and do not include transport tags or metadata."
+      : "",
     "</TOOL_RULES>",
     "<AVAILABLE_TOOLS>",
     catalog,
@@ -305,19 +391,64 @@ export function injectReasoningPrompt(
   return [{ role: "system", content: prompt }, ...messages];
 }
 
+function imageSubjectFromRequest(value: string): string {
+  const prompt = value
+    .replace(
+      /^\s*(?:(?:please|can you|could you|would you)\s+)*(?:generate|create|make|draw|paint|design|illustrate)\s+(?:(?:me\s+)?(?:an?\s+)?(?:image|picture|illustration|drawing|painting|artwork|photo|photograph|visual)\s+(?:of|showing|depicting)\s+|(?:an?\s+)?(?:image|picture)\s*[:,-]\s*)/i,
+      "",
+    )
+    .replace(/[.!?]+\s*$/, "")
+    .trim();
+  return prompt || value.trim();
+}
+
+function prepareImageGenerationRequest(
+  messages: OpenAIMessage[],
+  tools: OpenAITool[],
+): OpenAIMessage[] {
+  if (!tools.some((tool) => tool.function.name === "generate_image"))
+    return messages;
+  const prepared = [...messages];
+  const index = prepared.findLastIndex((message) => message.role === "user");
+  const message = prepared[index];
+  if (!message) return prepared;
+  if (typeof message.content === "string") {
+    const content = imageSubjectFromRequest(message.content);
+    if (content !== message.content) prepared[index] = { ...message, content };
+  } else if (Array.isArray(message.content)) {
+    let changed = false;
+    const content = message.content.map((part) => {
+      if (part.type !== "text") return part;
+      const text = imageSubjectFromRequest(part.text);
+      changed ||= text !== part.text;
+      return text === part.text ? part : { ...part, text };
+    });
+    if (changed) prepared[index] = { ...message, content };
+  }
+  return prepared;
+}
+
 export function injectToolPrompt(
   messages: OpenAIMessage[],
   tools: OpenAITool[],
   toolChoice?: ToolChoice,
   provider?: ToolShimProvider,
 ): OpenAIMessage[] {
+  messages = prepareImageGenerationRequest(messages, tools);
   const toolPrompt = buildToolSystemPrompt(tools, toolChoice, provider);
   const [first, ...rest] = messages;
 
   if (first?.role === "system" && typeof first.content === "string") {
-    if (first.content.includes(TOOL_PROMPT_SENTINEL)) return messages;
+    const sentinel = first.content.indexOf(TOOL_PROMPT_SENTINEL);
+    const callerPrompt =
+      sentinel >= 0
+        ? first.content.slice(0, sentinel).trimEnd()
+        : first.content;
     return [
-      { ...first, content: `${first.content}\n\n${toolPrompt}` },
+      {
+        ...first,
+        content: callerPrompt ? `${callerPrompt}\n\n${toolPrompt}` : toolPrompt,
+      },
       ...rest,
     ];
   }
@@ -339,7 +470,8 @@ function parseSearchArgumentAliases(
     return { ...args, query: args.search_query };
   }
   return args;
-}function parseLooseJsonObject(json: string): Record<string, unknown> | null {
+}
+function parseLooseJsonObject(json: string): Record<string, unknown> | null {
   try {
     const parsed: unknown = JSON.parse(json);
     if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
@@ -350,8 +482,6 @@ function parseSearchArgumentAliases(
   }
   return null;
 }
-const XML_TOOL_CALL_RE = /<TOOL_CALL>([\s\S]*?)<\/TOOL_CALL>/i;
-
 /** llm-tool-shim xml_en block: tool name plus one JSON params object. */
 function extractJsonObject(source: string, start: number): string | null {
   let depth = 0;
@@ -406,7 +536,8 @@ function validateToolArguments(
 ): string | null {
   const tool = tools?.find((item) => item.function.name === name);
   const schema = tool?.function.parameters;
-  if (!schema || typeof schema !== "object" || Array.isArray(schema)) return null;
+  if (!schema || typeof schema !== "object" || Array.isArray(schema))
+    return null;
   const required = (schema as { required?: unknown }).required;
   if (!Array.isArray(required)) return null;
   const missing = required.filter(
@@ -423,16 +554,40 @@ function toShimToolCall(
 ): { call: ShimToolCall | null; rejection: string | null } {
   const name = resolveToolName(intent.name, tools);
   if (!name) {
-    const listed = tools?.map((tool) => tool.function.name).join(", ") || "(none)";
+    const listed =
+      tools?.map((tool) => tool.function.name).join(", ") || "(none)";
     return {
       call: null,
       rejection: `Unknown tool "${intent.name}". Use only: ${listed}.`,
     };
   }
-  const argumentsValue =
-    normalizeName(name) === "web_search"
-      ? parseSearchArgumentAliases(intent.arguments)
-      : intent.arguments;
+  const selectedTool = tools?.find((tool) => tool.function.name === name);
+  let argumentsValue = intent.arguments;
+  if (selectedTool && isSearchTool(selectedTool)) {
+    const properties = toolParameterNames(selectedTool);
+    if (
+      properties.includes("search_query") &&
+      !properties.includes("query") &&
+      typeof argumentsValue.query === "string" &&
+      argumentsValue.search_query === undefined
+    ) {
+      const { query, ...rest } = argumentsValue;
+      argumentsValue = { ...rest, search_query: query };
+    } else if (
+      properties.includes("query") &&
+      !properties.includes("search_query") &&
+      typeof argumentsValue.search_query === "string" &&
+      argumentsValue.query === undefined
+    ) {
+      const { search_query, ...rest } = argumentsValue;
+      argumentsValue = { ...rest, query: search_query };
+    }
+  } else if (
+    normalizeName(name) === "web_search" ||
+    normalizeName(name) === "web_search_preview"
+  ) {
+    argumentsValue = parseSearchArgumentAliases(argumentsValue);
+  }
   const rejection = validateToolArguments(name, argumentsValue, tools);
   if (rejection) return { call: null, rejection };
   return {
@@ -451,12 +606,16 @@ function rejectBrokenToolMarkup(text: string): string[] {
   const openIndexes: number[] = [];
   const openRe = /<TOOL_CALL\b[^>]*>/gi;
   let openMatch: RegExpExecArray | null;
-  while ((openMatch = openRe.exec(text)) !== null) openIndexes.push(openMatch.index);
+  while ((openMatch = openRe.exec(text)) !== null)
+    openIndexes.push(openMatch.index);
 
   for (const start of openIndexes) {
     const afterOpen = text.slice(start);
     const closeIdx = afterOpen.search(/<\/TOOL_CALL>/i);
-    const block = closeIdx >= 0 ? afterOpen.slice(0, closeIdx + "</TOOL_CALL>".length) : afterOpen;
+    const block =
+      closeIdx >= 0
+        ? afterOpen.slice(0, closeIdx + "</TOOL_CALL>".length)
+        : afterOpen;
     const name = block.match(/\btool\s*[:=]\s*["']?([^\s"'\n<]+)/i)?.[1];
     const params = block.match(/params\s*[:=]\s*([\s\S]*)/i)?.[1] ?? "";
     const jsonStart = params.indexOf("{");
@@ -517,13 +676,18 @@ function rejectBrokenToolMarkup(text: string): string[] {
 
 /** Remove tool-call markup so rejected XML is never shown as the answer. */
 export function stripToolCallMarkup(text: string): string {
-  return text
-    .replace(/<TOOL_CALL\b[\s\S]*?<\/TOOL_CALL>/gi, "")
-    .replace(/<TOOL_CALL\b[\s\S]*$/gi, "")
-    // One-line / whitespace-loose forms: TOOL_CALL tool: ... params: ...
-    .replace(/<\/?TOOL_CALL\b[^>]*>/gi, "")
-    .replace(/(?:^|\n)\s*tool\s*[:=]\s*\S+[\s\S]*?\bparams\s*[:=][\s\S]*$/gi, "")
-    .trim();
+  return (
+    text
+      .replace(/<TOOL_CALL\b[\s\S]*?<\/TOOL_CALL>/gi, "")
+      .replace(/<TOOL_CALL\b[\s\S]*$/gi, "")
+      // One-line / whitespace-loose forms: TOOL_CALL tool: ... params: ...
+      .replace(/<\/?TOOL_CALL\b[^>]*>/gi, "")
+      .replace(
+        /(?:^|\n)\s*tool\s*[:=]\s*\S+[\s\S]*?\bparams\s*[:=][\s\S]*$/gi,
+        "",
+      )
+      .trim()
+  );
 }
 
 /** Gate tool calls: keep valid ones, collect rejection reasons for retries. */
@@ -574,7 +738,9 @@ export function rejectedToolCallStub(rejections: string[]): string {
 }
 
 export function toolCallRetrySignal(rejections: string[]): string {
-  const reasons = rejections.map((reason, index) => `${index + 1}. ${reason}`).join("\n");
+  const reasons = rejections
+    .map((reason, index) => `${index + 1}. ${reason}`)
+    .join("\n");
   return [
     "Your previous tool call was rejected by the tool gate.",
     reasons,

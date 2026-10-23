@@ -1,6 +1,10 @@
 import { Hono } from "hono";
 import type { Env, Variables } from "../types/env";
-import { invalidRequest, upstreamError, OpenAIHTTPError } from "../utils/errors";
+import {
+  invalidRequest,
+  upstreamError,
+  OpenAIHTTPError,
+} from "../utils/errors";
 
 const embeddings = new Hono<{ Bindings: Env; Variables: Variables }>();
 
@@ -54,14 +58,20 @@ embeddings.post("/v1/embeddings", async (c) => {
       : [];
 
   if (inputs.length === 0 || inputs.some((item) => typeof item !== "string")) {
-    throw invalidRequest("'input' must be a non-empty string or array of strings.");
+    throw invalidRequest(
+      "'input' must be a non-empty string or array of strings.",
+    );
   }
 
   const requestedModel = body.model || "baai/bge-base-en-v1.5";
   const cfModel = SUPPORTED_MODELS[requestedModel];
   if (!cfModel) {
-    const available = Object.keys(SUPPORTED_MODELS).filter((m) => !m.startsWith("@cf/")).join(", ");
-    throw invalidRequest(`Unsupported model '${requestedModel}'. Available: ${available}`);
+    const available = Object.keys(SUPPORTED_MODELS)
+      .filter((m) => !m.startsWith("@cf/"))
+      .join(", ");
+    throw invalidRequest(
+      `Unsupported model '${requestedModel}'. Available: ${available}`,
+    );
   }
 
   if (!c.env.AI) {
@@ -74,7 +84,11 @@ embeddings.post("/v1/embeddings", async (c) => {
   }
 
   const kv = c.env.CHAT_CACHE ?? c.env.MODEL_CACHE;
-  const data: Array<{ object: "embedding"; embedding: number[]; index: number }> = [];
+  const data: Array<{
+    object: "embedding";
+    embedding: number[];
+    index: number;
+  }> = [];
   let promptTokens = 0;
 
   for (let index = 0; index < inputs.length; index++) {
@@ -96,7 +110,7 @@ embeddings.post("/v1/embeddings", async (c) => {
 
     let embedding: number[];
     try {
-      const response = await c.env.AI.run(cfModel, { text: [text] }) as {
+      const response = (await c.env.AI.run(cfModel, { text: [text] })) as {
         data: number[][];
       };
       embedding = response?.data?.[0] ?? [];

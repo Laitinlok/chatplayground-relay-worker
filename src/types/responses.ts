@@ -37,7 +37,10 @@ export type ResponsesTool =
       strict?: boolean;
     }
   | { type: "function"; function: OpenAITool["function"] }
-  | { type: "web_search_preview"; search_context_size?: "low" | "medium" | "high" }
+  | {
+      type: "web_search_preview";
+      search_context_size?: "low" | "medium" | "high";
+    }
   | { type: "web_search"; search_context_size?: "low" | "medium" | "high" };
 
 export type ResponsesToolChoice =
@@ -155,7 +158,7 @@ export function responsesToolsToChatTools(
   if (!tools) return undefined;
   return tools.flatMap((tool) => {
     if (tool.type === "web_search_preview" || tool.type === "web_search") {
-      return normalizeOpenAITools([tool]);
+      return normalizeOpenAITools([tool], { preserveWebSearchPreview: true });
     }
     if ("function" in tool)
       return [{ type: "function", function: tool.function }];
@@ -234,7 +237,12 @@ export function responsesToChatRequest(
     model: req.model,
     messages,
     stream: req.stream,
-    user: req.user,
+    // `user` is an opaque caller identifier in the Responses API, not an
+    // upstream conversation ID. Sending it as chatId can make the upstream
+    // load a conversation the caller is not authorized to access. Responses
+    // conversations are stateless unless a valid upstream ID is introduced
+    // explicitly by a future compatibility field.
+    user: undefined,
     tools: responsesToolsToChatTools(req.tools),
     tool_choice: responsesToolChoiceToChatChoice(req.tool_choice),
     metadata: req.metadata ? { save: false } : undefined,

@@ -22,9 +22,23 @@ export interface BuiltUpstreamRequest {
   body: UpstreamChatRequest;
 }
 
+/** Agent endpoints reject transcripts and accept only the current prompt. */
+export function requiresNewPromptOnly(model: ModelEntry): boolean {
+  return /\b(?:agent|grok)\b/i.test(
+    `${model.id} ${model.modelName} ${model.upstreamModel} ${model.upstreamBotId}`,
+  );
+}
+
+function latestUserMessage(messages: ChatCompletionRequest["messages"]) {
+  return [...messages]
+    .toReversed()
+    .find((message) => message.role === "user");
+}
+
 export function buildUpstreamRequest(
   req: ChatCompletionRequest,
   model: ModelEntry,
+  options: { promptOnly?: boolean } = {},
 ): BuiltUpstreamRequest {
   // chatplayground accepts the same content shape as OpenAI (string or
   // ContentPart[]), so we pass `content` through unchanged. The only
@@ -35,7 +49,11 @@ export function buildUpstreamRequest(
   // upstream Azure/perplexity/lmsys endpoints reject outright ("400 Invalid
   // value for 'content': expected a string, got null"). Fold tool_calls and
   // tool-role results into plain text instead of dropping/nulling them.
-  const messages: UpstreamMessage[] = req.messages.flatMap((msg) => {
+  const promptOnly = options.promptOnly ?? requiresNewPromptOnly(model);
+  const sourceMessages = promptOnly || Boolean(req.user)
+    ? [latestUserMessage(req.messages) ?? { role: "user" as const, content: "" }]
+    : req.messages;
+  const messages: UpstreamMessage[] = sourceMessages.flatMap((msg) => {
     const role = msg.role === "tool" ? "user" : msg.role;
 
     let content: UpstreamMessage["content"];
@@ -53,11 +71,12 @@ export function buildUpstreamRequest(
         flattenContent(msg.content).trim(),
         msg.name,
       );
-      content = `<TOOL_RESULT>\n${result || "(no result returned)"}\n</TOOL_RESULT>\nAnswer the user's question from this result. Do not call the tool again and do not say you will check.`;
+      content = `<TOOL_RESULT>\n${result || "(no result returned)"}\n</TOOL_RESULT>\nTreat this result as evidence for the user's original question. Answer directly with the conclusion first; do not say you cannot verify it or merely list the result. Call another listed tool only when the result is insufficient.`;
     } else {
       const flat = flattenContent(msg.content);
       content =
-        Array.isArray(msg.content) && msg.content.some((part) => part.type === "image_url")
+        Array.isArray(msg.content) &&
+        msg.content.some((part) => part.type === "image_url")
           ? msg.content
           : flat.length > 0
             ? flat
@@ -94,7 +113,11 @@ export function buildUpstreamRequest(
     if (!plain) continue;
     const previous = prepared.at(-1);
     const note = `Draft so far (do not repeat it):\n${plain}`;
-    if (previous && previous.role === "user" && typeof previous.content === "string") {
+    if (
+      previous &&
+      previous.role === "user" &&
+      typeof previous.content === "string"
+    ) {
       previous.content = `${previous.content}\n\n${note}`;
     } else {
       prepared.push({ role: "user", content: note });
@@ -111,9 +134,11 @@ export function buildUpstreamRequest(
   // REGARDLESS of whether `tools` is present on this request — compliant
   // clients resend `tools` on every turn, so gating on its absence almost
   // never actually fires in real traffic.
-  const hasToolResultInHistory = req.messages.some((m) => m.role === "tool");
+  const hasToolResultInHistory =
+    !promptOnly && req.messages.some((m) => m.role === "tool");
   if (hasToolResultInHistory) {
-    const canCallAnotherTool = req.tools && req.tools.length > 0;
+    const canCallAnotherTool =
+      Boolean(req.tools?.length) && req.tool_choice !== "none";
     const listed = (req.tools ?? []).map((tool) => tool.function.name);
     const hasEditTool = listed.some((name) =>
       /edit|replace|write|create|apply|patch|file/i.test(name),
@@ -151,17 +176,20 @@ export function buildUpstreamRequest(
   // Fields shared by all three endpoints.
   const base = {
     messages,
+    // Prompt-only agents resume context by chatId; only their messages array
+    // is restricted to the current user prompt.
     chatId: req.user ?? "", // OpenAI `user` → chatplayground `chatId`
     isRegenerate: false,
     promptTemplate: null,
     fileUrl: null,
     botId: model.upstreamBotId,
+    submissionId: crypto.randomUUID(),
+    // Keep upstream chats unsaved by default. The relay separately caches the
+    // returned chatId so follow-up turns can resume without replaying history.
     noSave: !save,
     ...(req.reasoning_effort ? { reasoning_effort: req.reasoning_effort } : {}),
     ...(req.verbosity ? { verbosity: req.verbosity } : {}),
-    ...(req.max_tokens !== undefined
-      ? { maxTokens: req.max_tokens }
-      : {}),
+    ...(req.max_tokens !== undefined ? { maxTokens: req.max_tokens } : {}),
   };
 
   // The model identifier field differs per endpoint (see types/upstream.ts):
@@ -232,13 +260,24 @@ export function buildUpstreamHeaders(
   sessionToken: string,
   env: UpstreamHeaderEnv,
 ): HeadersInit {
-  // text/plain bypasses CORS preflight — chatplayground's frontend uses this
-  // exact content-type and the backend enforces it.
+  // Match the headers observed on the successful chatplayground browser call.
   return {
-    "content-type": "text/plain;charset=UTF-8",
-    authorization: `Bearer ${sessionToken}`,
-    origin: env.UPSTREAM_ORIGIN,
-    referer: env.UPSTREAM_REFERER,
     accept: "*/*",
+    "accept-language": "en-US,en;q=0.9",
+    authorization: `Bearer ${sessionToken}`,
+    "content-type": "application/json",
+    dnt: "1",
+    origin: env.UPSTREAM_ORIGIN,
+    priority: "u=1, i",
+    referer: env.UPSTREAM_REFERER,
+    "sec-ch-ua": '"Brave";v="155", "Chromium";v="155", "Not(A:Brand";v="24"',
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"Linux"',
+    "sec-fetch-dest": "empty",
+    "sec-fetch-mode": "cors",
+    "sec-fetch-site": "same-site",
+    "sec-gpc": "1",
+    "user-agent":
+      "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36",
   };
 }

@@ -40,6 +40,16 @@ describe("Responses adapter", () => {
     expect(request.tool_choice).toBe("required");
   });
 
+  it("does not map the Responses user field to an upstream chat ID", () => {
+    const request = responsesToChatRequest({
+      model: "grok-4.6",
+      input: "Hello",
+      user: "caller_123",
+    });
+
+    expect(request.user).toBeUndefined();
+  });
+
   it("preserves Responses image input for vision models", () => {
     const request = responsesToChatRequest({
       model: "llama-4-scout",
@@ -158,7 +168,9 @@ describe("Responses adapter", () => {
     expect(body).toContain(
       'event: response.created\ndata: {"type":"response.created","response":',
     );
-    expect(body).toContain('event: response.completed\ndata: {"type":"response.completed","response":');
+    expect(body).toContain(
+      'event: response.completed\ndata: {"type":"response.completed","response":',
+    );
     expect(body).toContain("event: response.content_part.added");
     expect(body).toContain("event: response.output_text.delta");
     expect(body).toContain('"delta":"hello"');
@@ -216,8 +228,10 @@ describe("Responses adapter", () => {
         snippet: "A current report.",
       },
     ]);
-    const webCall = result.output[0];
-    const message = result.output[1];
+    const webCall = result.output.find(
+      (item) => item.type === "web_search_call",
+    );
+    const message = result.output.find((item) => item.type === "message");
 
     expect(webCall).toMatchObject({
       type: "web_search_call",
@@ -249,7 +263,9 @@ describe("Responses adapter", () => {
       [{ role: "user", content: "question" }],
       "resp_perplexity_citations",
     );
-    const result = await addPerplexityCitations(base, ["https://source.example"]);
+    const result = await addPerplexityCitations(base, [
+      "https://source.example",
+    ]);
     const part = (result.output[0] as any).content[0];
 
     expect(result.output_text).toBe("The result is current [1].");
@@ -315,7 +331,7 @@ describe("Responses adapter", () => {
     ).toEqual([
       expect.objectContaining({
         type: "function",
-        function: expect.objectContaining({ name: "web_search" }),
+        function: expect.objectContaining({ name: "web_search_preview" }),
       }),
       expect.objectContaining({
         type: "function",

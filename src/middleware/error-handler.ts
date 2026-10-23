@@ -8,11 +8,15 @@ export const errorHandler: ErrorHandler<{
 }> = (err, _c) => {
   if (err instanceof OpenAIHTTPError) {
     const headers = new Headers({ "content-type": "application/json" });
-    if (err.status === 429) {
-      // ChatPlayground does not provide Retry-After. Prevent compatible clients
-      // from immediately replaying the same request and worsening the burst.
-      headers.set("retry-after", "60");
+    if (err.status >= 400 && err.status < 500) {
+      // Client/auth/tool errors cannot be repaired by replaying the same
+      // Responses request. In particular, Agora must not retry a failed
+      // image-generation tool call with the same invalid credential.
       headers.set("x-should-retry", "false");
+      if (err.status === 429) {
+        // ChatPlayground does not provide Retry-After.
+        headers.set("retry-after", "60");
+      }
     }
     return new Response(JSON.stringify(err.toEnvelope()), {
       status: err.status,

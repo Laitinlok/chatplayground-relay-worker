@@ -24,17 +24,31 @@ const FEED = [
     endpoint: "lmsys",
     premiumOnly: true,
   },
+  // Image models are returned on the second OpenAI cursor page for Agora.
+  {
+    botId: "gpt-image-2.5-sunburst",
+    modelName: "gpt-image-2.5-sunburst",
+    provider: "OpenAI",
+    group: "image",
+    endpoint: "image",
+    premiumOnly: false,
+  },
   // Audio model — discovery drops it before the listing ever sees it.
-  { botId: "tts-bot", modelName: "tts-bot", provider: "OpenAI", group: "audio" },
+  {
+    botId: "tts-bot",
+    modelName: "tts-bot",
+    provider: "OpenAI",
+    group: "audio",
+  },
 ];
 
 // oxlint-disable-next-line typescript/no-explicit-any -- minimal test env stub
-function get(testEnv: any = env) {
+function get(path = "/v1/models", testEnv: any = env) {
   // oxlint-disable-next-line typescript/no-explicit-any -- minimal test env stub
   const app = new Hono<any>();
   app.onError(errorHandler);
   app.route("/", models);
-  return app.request("/v1/models", {}, testEnv);
+  return app.request(path, {}, testEnv);
 }
 
 beforeEach(() => {
@@ -60,24 +74,58 @@ describe("GET /v1/models", () => {
     ]);
   });
 
+  it("returns image generation models on the cursor page", async () => {
+    const firstPage = (await (await get()).json()) as ModelList;
+    expect(firstPage).toMatchObject({
+      has_more: true,
+      last_id: "gpt-5.6-luna",
+    });
+
+    const secondPage = (await (
+      await get(`/v1/models?after=${firstPage.last_id}`)
+    ).json()) as ModelList;
+    expect(secondPage).toEqual({
+      object: "list",
+      data: [
+        {
+          id: "gpt-image-2.5-sunburst",
+          object: "model",
+          created: expect.any(Number),
+          owned_by: "openai",
+        },
+      ],
+    });
+  });
+
+  it("returns an empty final page for an unknown cursor", async () => {
+    const body = (await (
+      await get("/v1/models?after=unknown")
+    ).json()) as ModelList;
+    expect(body).toEqual({ object: "list", data: [] });
+  });
+
   it("hides premiumOnly models unless PREMIUM_MODELS is set", async () => {
-    const res = await get({ ...env, PREMIUM_MODELS: "true" });
+    const res = await get("/v1/models", { ...env, PREMIUM_MODELS: "true" });
     const ids = ((await res.json()) as ModelList).data.map((m) => m.id);
     expect(ids).toEqual(["gpt-5.6-luna", "grok-4.6"]);
   });
 
-  it("exposes /v1/models/capabilities with image/chat capability flags", async () => {
+  it("exposes image models through capabilities for image-generation selectors", async () => {
     const app = new Hono<any>();
     app.onError(errorHandler);
     app.route("/", models);
     const res = await app.request("/v1/models/capabilities", {}, env);
     expect(res.status).toBe(200);
     const body = (await res.json()) as any;
-    expect(body.object).toBe("list");
-    expect(body.data[0]).toMatchObject({
-      id: "gpt-5.6-luna",
-      capabilities: ["chat", "completion"],
-    });
+    expect(body.data).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "gpt-image-2.5-sunburst",
+          capabilities: ["image"],
+          modalities: { input: ["text"], output: ["image"] },
+        }),
+      ]),
+    );
   });
 
   it("503s when discovery fails instead of serving an empty list", async () => {

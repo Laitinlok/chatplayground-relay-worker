@@ -34,16 +34,63 @@ import {
   tryParseRelayToolCall,
   tryParseRelayToolCalls,
 } from "../utils/tool-shim";
-import { declinedToolUse, needsCurrentWebSearch, sanitizeSearchQuery } from "../utils/search-query";
-import { resolveCitationTitles } from "../utils/citation-titles";
+import { declinedToolUse } from "../utils/search-query";
+import { bridgeInlineImages } from "../utils/image-bridge";
 import {
-  resolveReasoningEffort,
-} from "../utils/reasoning-prefill";
+  isSearchTool,
+  prioritizeSearchTools,
+  selectToolForAutoChoice,
+} from "../utils/tool-selector";
+import { resolveCitationTitles } from "../utils/citation-titles";
+import { resolveReasoningEffort } from "../utils/reasoning-prefill";
 
 const chat = new Hono<{ Bindings: Env; Variables: Variables }>();
 
 const CHAT_CACHE_TTL_SECONDS = 60 * 60 * 24 * 7; // 7 days
-const MAX_SEARCH_RESULTS_PER_CALL = 50;
+
+function latestUserText(messages: OpenAIMessage[]): string {
+  const latestUser = [...messages]
+    .toReversed()
+    .find((message) => message.role === "user");
+  return typeof latestUser?.content === "string"
+    ? latestUser.content
+    : Array.isArray(latestUser?.content)
+      ? latestUser.content
+          .filter((part) => part.type === "text")
+          .map((part) => part.text)
+          .join(" ")
+      : "";
+}
+
+function logRequestShape(body: ChatCompletionRequest): void {
+  const messages = body.messages.map((message) => ({
+    role: message.role,
+    name: message.name,
+    tool_call_id: message.tool_call_id,
+    content:
+      typeof message.content === "string"
+        ? message.content.slice(0, 500)
+        : undefined,
+    tool_calls: message.tool_calls?.map((call) => ({
+      id: call.id,
+      name: call.function.name,
+      arguments: call.function.arguments.slice(0, 1_000),
+    })),
+  }));
+  console.log(
+    JSON.stringify({
+      event: "relay.chat.request",
+      model: body.model,
+      stream: body.stream === true,
+      tool_choice: body.tool_choice ?? null,
+      tools: normalizeOpenAITools(body.tools).map((tool) => ({
+        name: tool.function.name,
+        parameters: tool.function.parameters,
+      })),
+      messages,
+    }),
+  );
+}
 
 async function chatCacheKey(
   sessionToken: string,
@@ -91,11 +138,14 @@ chat.post("/v1/chat/completions", async (c) => {
     throw invalidRequest("'messages' must be a non-empty array.", "messages");
   }
 
+  if (c.env.DEBUG_REQUEST_LOGS === "true") logRequestShape(body);
+
   const registry = await getModels(c.env);
   const model = findModel(body.model, registry);
   if (!model) throw modelNotFound(body.model);
-
+  const isLuna = model.modelName.toLowerCase().includes("luna");
   const sessionToken = await c.get("sessionToken")();
+  await bridgeInlineImages(body.messages, c.env, sessionToken);
 
   // Reuse a prior upstream chat when the client hasn't explicitly set `user`
   // and there's a cached chatId for this conversation. This avoids spending
@@ -116,9 +166,7 @@ chat.post("/v1/chat/completions", async (c) => {
   // Upstream chatplayground chat: Luna only emits reliable function calls
   // when reasoning_effort is "none". Any other effort makes it ignore tools
   // or return empty/plan-only replies. /v1/responses uses the same rule.
-  const lunaWithTools =
-    model.modelName.toLowerCase().includes("luna") &&
-    normalizeOpenAITools(body.tools).length > 0;
+  const lunaWithTools = isLuna && normalizeOpenAITools(body.tools).length > 0;
   const reasoningEffort = lunaWithTools
     ? "none"
     : resolveReasoningEffort(model.modelName, body.reasoning_effort);
@@ -130,94 +178,64 @@ chat.post("/v1/chat/completions", async (c) => {
     body.messages = injectReasoningPrompt(body.messages, reasoningEffort);
   }
 
-  // Advertise the relay's hosted search tools as ordinary OpenAI function tools.
-  // Chat Completions returns calls to Agora/the client; unlike Responses, this
-  // endpoint does not execute web_search or web_fetch inside the Worker.
   const requestedTools = normalizeOpenAITools(body.tools);
-  const webSearchToolRequested = requestedTools.some(
-    (tool) => tool.function.name === "web_search",
+  const hasToolResult = originalMessages.some(
+    (message) => message.role === "tool",
   );
-  const webSearchRequested = requestedTools.some(
-    (tool) => tool.function.name === "web_search" || tool.function.name === "web_fetch",
+  const hasRelaySearchResult = originalMessages.some((message) => {
+    if (message.role !== "tool") return false;
+    if (
+      typeof message.name === "string" &&
+      requestedTools.some(
+        (tool) => tool.function.name === message.name && isSearchTool(tool),
+      )
+    )
+      return true;
+    if (!message.tool_call_id) return false;
+    return originalMessages.some(
+      (item) =>
+        item.role === "assistant" &&
+        item.tool_calls?.some(
+          (call) =>
+            call.id === message.tool_call_id &&
+            requestedTools.some(
+              (tool) =>
+                tool.function.name === call.function.name && isSearchTool(tool),
+            ),
+        ),
+    );
+  });
+  const toolsForModel = prioritizeSearchTools(
+    requestedTools,
+    hasRelaySearchResult || typeof body.tool_choice === "object",
+    latestUserText(body.messages),
   );
-  const toolsForModel = [...requestedTools];
+  const toolsRequested =
+    toolsForModel.length > 0 && body.tool_choice !== "none";
+  const forcedToolChoice = body.tool_choice;
   if (
-    webSearchRequested &&
-    !toolsForModel.some((tool) => tool.function.name === "web_search")
+    typeof forcedToolChoice === "object" &&
+    "function" in forcedToolChoice &&
+    !toolsForModel.some(
+      (tool) => tool.function.name === forcedToolChoice.function.name,
+    )
   ) {
-    toolsForModel.push({
-      type: "function",
-      function: {
-        name: "web_search",
-        description: "Search the web for a focused query before opening result URLs.",
-        parameters: {
-          type: "object",
-          properties: {
-            query: { type: "string" },
-            max_results: { type: "integer", minimum: 1, maximum: MAX_SEARCH_RESULTS_PER_CALL },
-          },
-          required: ["query"],
-        },
-      },
-    });
+    // An initial forced fetch/scrape call refers to a tool hidden by the
+    // search-first gate. Let the selector route this turn to discovery.
+    body.tool_choice = "auto";
   }
-  if (
-    webSearchRequested &&
-    !toolsForModel.some((tool) => tool.function.name === "web_fetch")
-  ) {
-    toolsForModel.push({
-      type: "function",
-      function: {
-        name: "web_fetch",
-        description: "Read a URL returned by an earlier web_search call.",
-        parameters: {
-          type: "object",
-          properties: { url: { type: "string" } },
-          required: ["url"],
-        },
-      },
-    });
-  }
-  const toolsRequested = toolsForModel.length > 0;
-  const latestUserText = (() => {
-    const latestUser = [...originalMessages].reverse().find((message) => message.role === "user");
-    return typeof latestUser?.content === "string"
-      ? latestUser.content
-      : Array.isArray(latestUser?.content)
-        ? latestUser.content.filter((part) => part.type === "text").map((part) => part.text).join(" ")
-        : "";
-  })();
-  // "latest/today/news" cannot be answered from memory. Force the search
-  // call when the client already exposed web_search.
-  const forceCurrentSearch =
-    webSearchRequested && needsCurrentWebSearch(latestUserText);
-  if (forceCurrentSearch && !originalMessages.some((message) => message.role === "tool")) body.tool_choice = "required";
-  // First tool turn must call something. Later turns, which already carry a
-  // tool result, go back to auto so the model can answer.
-  const hasToolResult = originalMessages.some((message) => message.role === "tool");
-  if (toolsRequested && !hasToolResult && body.tool_choice !== "none") {
-    body.tool_choice = body.tool_choice ?? "required";
-  }
-  if (webSearchRequested) {
-    // Keep search model-directed: the model must emit a web_search tool call,
-    // which the relay executes and returns as a tool result. Do not pre-run
-    // hosted search here, because that bypasses the tool-call exchange clients
-    // such as Agora expect to see and misses the model's own focused query.
-    if (!forceCurrentSearch) body.tool_choice = body.tool_choice ?? "auto";
-    body.messages.push({
-      role: "system",
-      content:
-        hasToolResult
-          ? toolsForModel.some((tool) => !/^web_(search|fetch)$/i.test(tool.function.name))
-            ? "A tool result is already above. Continue the user's task. Prefer the next needed edit/write/replace <TOOL_CALL> over a prose-only reply when the task is unfinished."
-            : "A tool result is already above. Answer the user's question from it in natural language. Do not announce that you will check or search."
-          : forceCurrentSearch
-            ? "The user asked for current information (latest, today, or news). You must call web_search before answering. Do not answer from memory."
-            : "The user requested web research. You must begin by calling web_search with a focused query; do not answer before the search tool returns. Then use web_fetch on relevant returned URLs when snippets are insufficient. If evidence is still missing, make another distinct web_search call. After research is sufficient, answer normally without another tool call.",
-    });
-  }
-  body.tools = toolsRequested ? toolsForModel : undefined;
+  let selectedTool: ReturnType<typeof tryParseRelayToolCall> = null;
   if (toolsRequested) {
+    body.tools = toolsForModel;
+    selectedTool = hasToolResult
+      ? null
+      : await selectToolForAutoChoice(body, model, c.env, sessionToken);
+    if (selectedTool) {
+      body.tool_choice = {
+        type: "function",
+        function: { name: selectedTool.function.name },
+      };
+    }
     body.messages = injectToolPrompt(
       body.messages,
       toolsForModel,
@@ -228,13 +246,59 @@ chat.post("/v1/chat/completions", async (c) => {
 
   const id = `chatcmpl-${crypto.randomUUID()}`;
   const created = Math.floor(Date.now() / 1000);
+  if (selectedTool) {
+    if (!body.stream) {
+      return Response.json({
+        id,
+        object: "chat.completion",
+        created,
+        model: model.id,
+        choices: [
+          {
+            index: 0,
+            message: {
+              role: "assistant",
+              content: null,
+              tool_calls: [selectedTool],
+            },
+            finish_reason: "tool_calls",
+          },
+        ],
+        usage: estimateUsage(originalMessages, ""),
+      } satisfies ChatCompletionResponse);
+    }
+    const source = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          new TextEncoder().encode(
+            `<TOOL_CALL>\ntool: ${selectedTool.function.name}\nparams:\n${selectedTool.function.arguments}\n</TOOL_CALL>`,
+          ),
+        );
+        controller.close();
+      },
+    });
+    return new Response(
+      streamUpstreamWithToolShim(source, {
+        id,
+        model: model.id,
+        created,
+        tools: body.tools,
+      }),
+      {
+        headers: {
+          "content-type": "text/event-stream; charset=utf-8",
+          "cache-control": "no-cache, no-transform",
+        },
+      },
+    );
+  }
+
   let rawContent = "";
   let citations: readonly string[] = [];
   let chatId: string | null = null;
   let toolCall: ReturnType<typeof tryParseRelayToolCall> = null;
 
   const built = buildUpstreamRequest(body, model);
-  console.log("UPSTREAM BODY:", JSON.stringify(built.body));
   const upstream = await fetch(
     endpointUrl(built.endpoint, c.env.UPSTREAM_CHAT_URL),
     {
@@ -269,19 +333,26 @@ chat.post("/v1/chat/completions", async (c) => {
   // rejection reasons so the model can emit a corrected <TOOL_CALL>.
   // If we already have at least one valid call, forward it immediately —
   // an extra upstream round-trip here is what makes Agora show "retry 1/5".
-  if (toolsRequested && toolGate.rejections.length > 0 && toolGate.calls.length === 0) {
+  if (
+    toolsRequested &&
+    toolGate.rejections.length > 0 &&
+    toolGate.calls.length === 0
+  ) {
     body.messages = [
       ...body.messages,
       { role: "assistant", content: rejectedToolCallStub(toolGate.rejections) },
       { role: "user", content: toolCallRetrySignal(toolGate.rejections) },
     ];
     const gateBuilt = buildUpstreamRequest(body, model);
-    const gateRetry = await fetch(endpointUrl(gateBuilt.endpoint, c.env.UPSTREAM_CHAT_URL), {
-      method: "POST",
-      headers: buildUpstreamHeaders(sessionToken, c.env),
-      body: JSON.stringify(gateBuilt.body),
-      signal: AbortSignal.timeout(CHAT_TIMEOUT),
-    });
+    const gateRetry = await fetch(
+      endpointUrl(gateBuilt.endpoint, c.env.UPSTREAM_CHAT_URL),
+      {
+        method: "POST",
+        headers: buildUpstreamHeaders(sessionToken, c.env),
+        body: JSON.stringify(gateBuilt.body),
+        signal: AbortSignal.timeout(CHAT_TIMEOUT),
+      },
+    );
     if (gateRetry.ok && gateRetry.body) {
       const gateParsed = await collectUpstream(gateRetry.body);
       const gated = gateToolCalls(gateParsed.content, body.tools);
@@ -299,7 +370,9 @@ chat.post("/v1/chat/completions", async (c) => {
       } else {
         toolCall = null;
         toolGate = { calls: [], rejections: gated.rejections };
-        rawContent = stripToolCallMarkup(gateParsed.content) || stripToolCallMarkup(rawContent);
+        rawContent =
+          stripToolCallMarkup(gateParsed.content) ||
+          stripToolCallMarkup(rawContent);
       }
     } else {
       toolCall = null;
@@ -310,10 +383,9 @@ chat.post("/v1/chat/completions", async (c) => {
     rawContent = stripToolCallMarkup(rawContent);
   }
 
-  // A tool result is already present and the model only announced that it
-  // will check. Ask once more for the answer itself, and keep the plan only
-  // if the follow-up is empty.
-  if (hasToolResult && !toolCall && declinedToolUse(rawContent)) {
+  // their first completed upstream response is returned without another
+  // potentially expensive provider round-trip.
+  if (isLuna && hasToolResult && !toolCall && declinedToolUse(rawContent)) {
     body.messages = [
       ...body.messages,
       { role: "assistant", content: rawContent },
@@ -324,16 +396,21 @@ chat.post("/v1/chat/completions", async (c) => {
       },
     ];
     const retryBuilt = buildUpstreamRequest(body, model);
-    const retry = await fetch(endpointUrl(retryBuilt.endpoint, c.env.UPSTREAM_CHAT_URL), {
-      method: "POST",
-      headers: buildUpstreamHeaders(sessionToken, c.env),
-      body: JSON.stringify(retryBuilt.body),
-      signal: AbortSignal.timeout(CHAT_TIMEOUT),
-    });
+    const retry = await fetch(
+      endpointUrl(retryBuilt.endpoint, c.env.UPSTREAM_CHAT_URL),
+      {
+        method: "POST",
+        headers: buildUpstreamHeaders(sessionToken, c.env),
+        body: JSON.stringify(retryBuilt.body),
+        signal: AbortSignal.timeout(CHAT_TIMEOUT),
+      },
+    );
     if (retry.ok && retry.body) {
       const retryParsed = await collectUpstream(retry.body);
       const retryText = retryParsed.content.trim();
-      const retryCall = toolsRequested ? tryParseRelayToolCall(retryText, body.tools) : null;
+      const retryCall = toolsRequested
+        ? tryParseRelayToolCall(retryText, body.tools)
+        : null;
       if (retryText && !retryCall && !declinedToolUse(retryText)) {
         rawContent = retryParsed.content;
         citations = retryParsed.citations;
@@ -345,23 +422,14 @@ chat.post("/v1/chat/completions", async (c) => {
     }
   }
 
-  // Some upstream model families return an empty completion instead of the
-  // requested tool-call envelope. If the client explicitly requested
-  // web_search, emit a valid delegated tool call using the latest user prompt
-  // so Agora/OpenAI clients can still execute the search themselves.
-  if (
-    !toolCall &&
-    webSearchToolRequested &&
-    !hasToolResult &&
-    (!rawContent.trim() || forceCurrentSearch || declinedToolUse(rawContent))
-  ) {
-    const query = sanitizeSearchQuery(latestUserText);
-    if (query) {
-      rawContent = `<TOOL_CALL>\ntool: web_search\nparams:\n${JSON.stringify({ query, max_results: 5 })}\n</TOOL_CALL>`;
-      toolCall = tryParseRelayToolCall(rawContent, body.tools);
-    }
+  if (body.stream && toolCall && toolGate.calls.length) {
+    rawContent = toolGate.calls
+      .map(
+        (call) =>
+          `<TOOL_CALL>\ntool: ${call.function.name}\nparams:\n${call.function.arguments}\n</TOOL_CALL>`,
+      )
+      .join("\n");
   }
-
   // Keep citations supplied by the upstream provider. Hosted search results
   // are evidence for the model, not an instruction to append a Sources list;
   // the model follows citation requirements from the caller's system prompt.
@@ -373,7 +441,9 @@ chat.post("/v1/chat/completions", async (c) => {
         ? `CITATIONS:${JSON.stringify(responseCitations)}`
         : "";
       const chatIdTrailer = chatId ? `CHAT_ID:${chatId}` : "";
-      controller.enqueue(encoder.encode(`${rawContent}${citationsTrailer}${chatIdTrailer}`));
+      controller.enqueue(
+        encoder.encode(`${rawContent}${citationsTrailer}${chatIdTrailer}`),
+      );
       controller.close();
     },
   });
@@ -418,7 +488,15 @@ chat.post("/v1/chat/completions", async (c) => {
       choices: [
         {
           index: 0,
-          message: { role: "assistant", content: "", tool_calls: toolGate.calls.length ? toolGate.calls : tryParseRelayToolCalls(rawContent, body.tools) },
+          message: {
+            role: "assistant",
+            // Tool-only assistant turn. `null` avoids clients rendering this
+            // as a blank final response before processing tool_calls.
+            content: null,
+            tool_calls: toolGate.calls.length
+              ? toolGate.calls
+              : tryParseRelayToolCalls(rawContent, body.tools),
+          },
           finish_reason: "tool_calls",
         },
       ],

@@ -8,16 +8,27 @@ const models = new Hono<{ Bindings: Env; Variables: Variables }>();
 models.get("/v1/models", async (c) => {
   const registry = await getModels(c.env);
   const created = Math.floor(Date.now() / 1000);
+  const visible = registry.filter((m) => isVisible(m, c.env));
+  const chatModels = visible.filter((m) => m.endpoint !== "image");
+  const imageModels = visible.filter((m) => m.endpoint === "image");
+  const after = c.req.query("after");
+  const lastChatModelId = chatModels.at(-1)?.id;
+
+  // Agora follows OpenAI cursor pagination when `has_more` is set. This keeps
+  // image-generation models off the initial catalog used by clients that only
+  // consume the first page, while allowing Agora to synchronize both pages.
+  const page =
+    after === lastChatModelId ? imageModels : after ? [] : chatModels;
+  const hasMore = !after && chatModels.length > 0 && imageModels.length > 0;
   const list: ModelList = {
     object: "list",
-    data: registry
-      .filter((m) => isVisible(m, c.env))
-      .map((m) => ({
-        id: m.id,
-        object: "model",
-        created,
-        owned_by: m.provider,
-      })),
+    data: page.map((m) => ({
+      id: m.id,
+      object: "model",
+      created,
+      owned_by: m.provider,
+    })),
+    ...(hasMore ? { has_more: true, last_id: lastChatModelId } : {}),
   };
   return c.json(list);
 });
@@ -39,9 +50,7 @@ const handleCapabilities = async (c: any) => {
       // AnythingLLM checks: model?.capabilities?.includes("image")
       // LocalAI API documentation also mentions boolean flags/strings.
       // We support both array format and object format for maximum compatibility.
-      capabilities: isImage
-        ? ["image"]
-        : ["chat", "completion"],
+      capabilities: isImage ? ["image"] : ["chat", "completion"],
       modalities: {
         input: isImage ? ["text"] : ["text", "image"],
         output: isImage ? ["image"] : ["text"],

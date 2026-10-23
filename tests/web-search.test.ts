@@ -4,6 +4,61 @@ import { webSearch } from "../src/utils/web-search";
 afterEach(() => vi.restoreAllMocks());
 
 describe("Cloudflare Search web search", () => {
+  it("accepts configured provider results taking longer than 500 ms", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+        if (String(input).startsWith("https://search.example.test/")) {
+          await new Promise((resolve) => setTimeout(resolve, 750));
+          return Response.json({
+            results: [
+              { title: "Slow result", url: "https://example.org/result" },
+            ],
+          });
+        }
+        return new Response("Unavailable", { status: 503 });
+      });
+      const result = webSearch("latest news", {
+        url: "https://search.example.test",
+      });
+      await vi.advanceTimersByTimeAsync(750);
+      expect(await result).toEqual([
+        {
+          title: "Slow result",
+          url: "https://example.org/result",
+          snippet: "",
+        },
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("cancels losing providers after a useful response", async () => {
+    const signals: AbortSignal[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      if (init?.signal) signals.push(init.signal);
+      if (String(input) === "https://search.example.test/search") {
+        return Response.json({
+          results: [{ title: "Result", url: "https://example.org/result" }],
+        });
+      }
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener(
+          "abort",
+          () => reject(new Error("aborted")),
+          { once: true },
+        );
+      });
+    });
+    const result = await webSearch("query", {
+      url: "https://search.example.test",
+    });
+    expect(result).toHaveLength(1);
+    expect(signals).toHaveLength(4);
+    expect(signals.every((signal) => signal.aborted)).toBe(true);
+  });
+
   it("normalizes aggregated results and sends the configured Bearer token", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       Response.json({
@@ -32,7 +87,10 @@ describe("Cloudflare Search web search", () => {
       },
     ]);
 
-    const [requestUrl, init] = vi.mocked(fetch).mock.calls[0] as [string, RequestInit];
+    const [requestUrl, init] = vi.mocked(fetch).mock.calls[0] as [
+      string,
+      RequestInit,
+    ];
     expect(requestUrl).toBe("https://search.example.test/search");
     expect(init.method).toBe("POST");
     expect(new Headers(init.headers).get("content-type")).toContain(
@@ -73,28 +131,32 @@ describe("Cloudflare Search web search", () => {
   });
 
   it("falls back to Jina Markdown DuckDuckGo results when Cloudflare fails", async () => {
-    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
-      const url = String(input);
-      if (url.includes("search.example.test")) {
-        return new Response("unauthorized", { status: 401 });
-      }
-      return new Response(
-        [
-          "Title: query at DuckDuckGo",
-          "",
-          "Markdown Content:",
-          "## [OpenAI News](https://duckduckgo.com/l/?uddg=https%3A%2F%2Fopenai.com%2Fnews%2F&rut=abc)",
-          "",
-          "[Stay up to speed on AI.](https://duckduckgo.com/l/?uddg=https%3A%2F%2Fopenai.com%2Fnews%2F&rut=abc)",
-          "",
-          "## [Reuters OpenAI](https://duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.reuters.com%2Ftechnology%2Fopenai%2F&rut=def)",
-          "",
-          "Latest OpenAI stories from Reuters.",
-        ].join("\n"),
-      );
-    });
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (input) => {
+        const url = String(input);
+        if (url.includes("search.example.test")) {
+          return new Response("unauthorized", { status: 401 });
+        }
+        return new Response(
+          [
+            "Title: query at DuckDuckGo",
+            "",
+            "Markdown Content:",
+            "## [OpenAI News](https://duckduckgo.com/l/?uddg=https%3A%2F%2Fopenai.com%2Fnews%2F&rut=abc)",
+            "",
+            "[Stay up to speed on AI.](https://duckduckgo.com/l/?uddg=https%3A%2F%2Fopenai.com%2Fnews%2F&rut=abc)",
+            "",
+            "## [Reuters OpenAI](https://duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.reuters.com%2Ftechnology%2Fopenai%2F&rut=def)",
+            "",
+            "Latest OpenAI stories from Reuters.",
+          ].join("\n"),
+        );
+      });
 
-    const results = await webSearch("query", { url: "https://search.example.test" });
+    const results = await webSearch("query", {
+      url: "https://search.example.test",
+    });
     expect(results.length).toBeGreaterThan(0);
     expect(results[0]).toEqual({
       title: "OpenAI News",
@@ -102,45 +164,62 @@ describe("Cloudflare Search web search", () => {
       snippet: "Stay up to speed on AI.",
     });
     expect(results[1]?.url).toBe("https://www.reuters.com/technology/openai/");
-    expect(fetchMock.mock.calls.map(([url]) => String(url)).some((url) => url.includes("r.jina.ai"))).toBe(true);
+    expect(
+      fetchMock.mock.calls
+        .map(([url]) => String(url))
+        .some((url) => url.includes("r.jina.ai")),
+    ).toBe(true);
   });
 
   it("rejects an invalid search URL and falls back to Jina/DuckDuckGo", async () => {
-    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response("", { status: 500 }),
-    );
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response("", { status: 500 }));
     await expect(webSearch("query", { url: "not-a-url" })).resolves.toEqual([]);
     expect(fetchMock).toHaveBeenCalled();
     expect(String(fetchMock.mock.calls[0]?.[0])).toContain("r.jina.ai");
   });
 
   it("tries GET when Cloudflare POST fails with 500", async () => {
-    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
-      const url = String(input);
-      if (url.includes("search.example.test") && (init?.method ?? "GET") === "POST") {
-        return new Response("worker error", { status: 500 });
-      }
-      if (url.includes("search.example.test")) {
-        return Response.json({
-          results: [
-            {
-              title: "Via GET",
-              url: "https://example.org/get",
-              description: " recovered",
-            },
-          ],
-        });
-      }
-      return new Response("", { status: 500 });
-    });
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (input, init) => {
+        const url = String(input);
+        if (
+          url.includes("search.example.test") &&
+          (init?.method ?? "GET") === "POST"
+        ) {
+          return new Response("worker error", { status: 500 });
+        }
+        if (url.includes("search.example.test")) {
+          return Response.json({
+            results: [
+              {
+                title: "Via GET",
+                url: "https://example.org/get",
+                description: " recovered",
+              },
+            ],
+          });
+        }
+        return new Response("", { status: 500 });
+      });
 
     const results = await webSearch("query", {
       url: "https://search.example.test",
       token: "tok",
     });
     expect(results).toEqual([
-      { title: "Via GET", url: "https://example.org/get", snippet: "recovered" },
+      {
+        title: "Via GET",
+        url: "https://example.org/get",
+        snippet: "recovered",
+      },
     ]);
-    expect(fetchMock.mock.calls.some(([, init]) => (init?.method ?? "GET") === "GET")).toBe(true);
+    expect(
+      fetchMock.mock.calls.some(
+        ([, init]) => (init?.method ?? "GET") === "GET",
+      ),
+    ).toBe(true);
   });
 });

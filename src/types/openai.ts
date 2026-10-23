@@ -19,6 +19,7 @@ export interface OpenAIMessage {
   role: "system" | "user" | "assistant" | "tool";
   content: OpenAIMessageContent;
   name?: string;
+  tool_call_id?: string;
   tool_calls?: Array<{
     id: string;
     type: "function";
@@ -119,6 +120,10 @@ export interface ModelListItem {
 export interface ModelList {
   object: "list";
   data: ModelListItem[];
+  // OpenAI cursor pagination. Agora follows this to obtain the image-model
+  // page, while clients that only read the initial page receive chat models.
+  has_more?: boolean;
+  last_id?: string;
 }
 
 export interface OpenAIErrorEnvelope {

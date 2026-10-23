@@ -72,14 +72,18 @@ export function withPrefill(
   const seeded = [...messages];
   // Upstream rejects an assistant prefill, so continue the draft on the
   // last user turn. A later user message still sees it as prior text.
-  const lastUserIndex = seeded.findLastIndex((message) => message.role === "user");
+  const lastUserIndex = seeded.findLastIndex(
+    (message) => message.role === "user",
+  );
   const lastUser = lastUserIndex >= 0 ? seeded[lastUserIndex] : undefined;
   if (lastUser && typeof lastUser.content === "string") {
     seeded[lastUserIndex] = {
       ...lastUser,
       content: [lastUser.content.trim(), content].filter(Boolean).join("\n\n"),
     };
-    return seeded.filter((message) => message.role !== "assistant" || message.tool_calls);
+    return seeded.filter(
+      (message) => message.role !== "assistant" || message.tool_calls,
+    );
   }
   seeded.push({ role: "user", content });
   return seeded;
@@ -107,7 +111,10 @@ export function toolSelectionNote(draft: string): string {
     .replace(/\r\n/g, "\n")
     .split("\n")
     .map((line) => line.trim())
-    .filter((line) => line && !/^TOOL_CALL\s*:/i.test(line) && !/^ARGUMENTS\s*:/i.test(line))
+    .filter(
+      (line) =>
+        line && !/^TOOL_CALL\s*:/i.test(line) && !/^ARGUMENTS\s*:/i.test(line),
+    )
     .join("\n")
     .slice(0, 1200);
   if (!notes) return "";

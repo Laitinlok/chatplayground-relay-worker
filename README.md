@@ -152,7 +152,9 @@ live cookie.
 | Endpoint | Notes |
 |---|---|
 | `POST /v1/chat/completions` | Stream + non-stream; multimodal (`image_url` content parts); relay-hosted `web_search` / `web_fetch` tools |
-| `GET /v1/models` | Dynamic discovery from chatplayground's `/api/models`, KV + memory cached; `premiumOnly` models hidden unless `PREMIUM_MODELS="true"` |
+| `GET /v1/models` | Dynamic discovery of chat/completion models; image-generation models are returned on an OpenAI cursor page (`?after=<last_id>`) for pagination-aware clients such as Agora |
+| `GET /v1/models/capabilities` | Capability-aware catalog for AnythingLLM and other clients; includes image-generation models marked with `capabilities: ["image"]` |
+
 | `POST /v1/files` | Image upload proxy → returns a URL usable as `image_url.url` |
 
 | Not supported | Why |
@@ -171,8 +173,17 @@ one. Models chatplayground marks `active:false` are still exposed — that flag
 is UI visibility only, and inactive models remain callable upstream.
 
 Models the feed marks `premiumOnly` are **hidden from `GET /v1/models` by
-default**, because upstream returns 403 for them without a premium plan; set
-`PREMIUM_MODELS="true"` to list them anyway. Everything else is shown,
+ default**, because upstream returns 403 for them without a premium plan; set
+ `PREMIUM_MODELS="true"` to list them anyway. The initial `/v1/models` page
+ contains chat/completion models. When image models exist, it sets
+ `has_more: true` and `last_id`; clients that request
+ `GET /v1/models?after=<last_id>` receive the image-model page. This lets Agora
+ synchronize image models while clients that only read the initial page do not
+ display them as chat models. `GET /v1/models/capabilities` always includes
+ image models with `capabilities: ["image"]` and
+ `modalities.output: ["image"]`.
+
+
 including the three models flagged `lifetimeOnly` — see the caveats for what
 that flag is and isn't known to do. Hidden models stay callable either way:
 the filter only changes what the relay advertises, and upstream remains the
@@ -468,7 +479,7 @@ Set `CLOUDFLARE_SEARCH_URL` as a Worker variable in `wrangler.jsonc` `vars` (or 
 npx wrangler secret put CLOUDFLARE_SEARCH_TOKEN
 ```
 
-The configured service returns search-result snippets. The relay exposes `web_search` and `web_fetch` to compatible requests; `web_fetch` can return the snippet for a URL from the search results, but does not retrieve full page contents.
+The 500 ms client-search fallback is used only when a Responses request declares both an OpenAI hosted search tool and exactly one caller-owned function search tool. If the hosted search has not produced results by then, the relay aborts its hosted providers and returns that caller function call. Chat Completions and Responses requests without this explicit fallback capability wait for the configured provider timeouts.
 
 | Binding | Purpose |
 |---|---|

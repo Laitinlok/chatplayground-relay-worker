@@ -13,22 +13,32 @@ export interface CitationTitleOptions {
   searchToken?: string;
 }
 
-
 function isBlockedHost(hostname: string): boolean {
   const host = hostname.toLowerCase().replace(/[\[\]]/g, "");
-  if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local")) return true;
+  if (
+    host === "localhost" ||
+    host.endsWith(".localhost") ||
+    host.endsWith(".local")
+  )
+    return true;
   if (/^(10\.|127\.|169\.254\.|192\.168\.)/.test(host)) return true;
   const private172 = host.match(/^172\.(\d+)\./);
-  if (private172 && Number(private172[1]) >= 16 && Number(private172[1]) <= 31) return true;
+  if (private172 && Number(private172[1]) >= 16 && Number(private172[1]) <= 31)
+    return true;
   return host === "::1" || host.startsWith("fc") || host.startsWith("fd");
 }
 
 function unusableTitle(title: string | null | undefined): boolean {
   if (!title) return true;
-  return /^(access denied|forbidden|just a moment\.\.\.|attention required|security verification|cloudflare)$/i.test(title.trim());
+  return /^(access denied|forbidden|just a moment\.\.\.|attention required|security verification|cloudflare)$/i.test(
+    title.trim(),
+  );
 }
 
-async function readBoundedText(response: Response, maxBytes: number): Promise<string> {
+async function readBoundedText(
+  response: Response,
+  maxBytes: number,
+): Promise<string> {
   if (!response.body) return "";
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
@@ -60,7 +70,9 @@ async function fetchOgFetchTitle(url: string): Promise<string | null> {
   const text = await readBoundedText(response, MAX_METADATA_BYTES);
   try {
     const payload = JSON.parse(text) as { title?: unknown };
-    return normalizeTitle(typeof payload.title === "string" ? payload.title : null);
+    return normalizeTitle(
+      typeof payload.title === "string" ? payload.title : null,
+    );
   } catch {
     return null;
   }
@@ -77,7 +89,9 @@ async function fetchMicrolinkTitle(url: string): Promise<string | null> {
   const text = await readBoundedText(response, MAX_METADATA_BYTES);
   try {
     const payload = JSON.parse(text) as { data?: { title?: unknown } };
-    return normalizeTitle(typeof payload.data?.title === "string" ? payload.data.title : null);
+    return normalizeTitle(
+      typeof payload.data?.title === "string" ? payload.data.title : null,
+    );
   } catch {
     return null;
   }
@@ -109,9 +123,7 @@ function normalizeTitle(value: string | null | undefined): string | null {
   return title ? title.slice(0, MAX_TITLE_CHARS) : null;
 }
 
-async function fetchHtmlTitle(
-  response: Response,
-): Promise<string | null> {
+async function fetchHtmlTitle(response: Response): Promise<string | null> {
   if (!response.body) return null;
   let documentTitle = "";
   let openGraphTitle: string | null = null;
@@ -153,64 +165,78 @@ export async function resolveCitationTitles(
   urls: readonly string[],
   options: CitationTitleOptions = {},
 ): Promise<ReadonlyMap<string, string>> {
-  const entries = await Promise.all(urls.map(async (url) => {
-    const fallback = fallbackTitle(url);
-  try {
-    const parsed = new URL(url);
-    const hostname = parsed.hostname.toLowerCase().replace(/[\[\]]/g, "");
-    if (
-      (parsed.protocol !== "https:" && parsed.protocol !== "http:") ||
-      parsed.username ||
-      parsed.password ||
-      isBlockedHost(hostname)
-    ) {
-      return [url, fallback] as const;
-    }
-    const response = await fetch(parsed, {
-      headers: { accept: "text/html,application/xhtml+xml" },
-      redirect: "follow",
-      signal: AbortSignal.timeout(TITLE_FETCH_TIMEOUT_MS),
-    });
-    if (!response.ok) {
-      if (options.searchUrl) {
-        const searchResults = await webSearch(url, { url: options.searchUrl, token: options.searchToken, count: 1 });
-        const searchTitle = searchResults[0]?.title;
-        if (!unusableTitle(searchTitle)) return [url, searchTitle!] as const;
-      }
-      return [url, fallback] as const;
-    }
-    if (response.url) {
-      const finalUrl = new URL(response.url);
-      if (
-        (finalUrl.protocol !== "https:" && finalUrl.protocol !== "http:") ||
-        isBlockedHost(finalUrl.hostname.toLowerCase().replace(/[\\[\\]]/g, ""))
-      ) {
+  const entries = await Promise.all(
+    urls.map(async (url) => {
+      const fallback = fallbackTitle(url);
+      try {
+        const parsed = new URL(url);
+        const hostname = parsed.hostname.toLowerCase().replace(/[\[\]]/g, "");
+        if (
+          (parsed.protocol !== "https:" && parsed.protocol !== "http:") ||
+          parsed.username ||
+          parsed.password ||
+          isBlockedHost(hostname)
+        ) {
+          return [url, fallback] as const;
+        }
+        const response = await fetch(parsed, {
+          headers: { accept: "text/html,application/xhtml+xml" },
+          redirect: "follow",
+          signal: AbortSignal.timeout(TITLE_FETCH_TIMEOUT_MS),
+        });
+        if (!response.ok) {
+          if (options.searchUrl) {
+            const searchResults = await webSearch(url, {
+              url: options.searchUrl,
+              token: options.searchToken,
+              count: 1,
+            });
+            const searchTitle = searchResults[0]?.title;
+            if (!unusableTitle(searchTitle))
+              return [url, searchTitle!] as const;
+          }
+          return [url, fallback] as const;
+        }
+        if (response.url) {
+          const finalUrl = new URL(response.url);
+          if (
+            (finalUrl.protocol !== "https:" && finalUrl.protocol !== "http:") ||
+            isBlockedHost(
+              finalUrl.hostname.toLowerCase().replace(/[\\[\\]]/g, ""),
+            )
+          ) {
+            return [url, fallback] as const;
+          }
+        }
+        const title = await fetchHtmlTitle(response);
+        if (!unusableTitle(title)) return [url, title!] as const;
+        for (const fetcher of [
+          fetchOgFetchTitle,
+          fetchMicrolinkTitle,
+          fetchJinaTitle,
+        ]) {
+          try {
+            const alternateTitle = await fetcher(url);
+            if (!unusableTitle(alternateTitle))
+              return [url, alternateTitle!] as const;
+          } catch {
+            // Continue through the metadata fallback chain.
+          }
+        }
+        if (options.searchUrl) {
+          const searchResults = await webSearch(url, {
+            url: options.searchUrl,
+            token: options.searchToken,
+            count: 1,
+          });
+          const searchTitle = searchResults[0]?.title;
+          if (!unusableTitle(searchTitle)) return [url, searchTitle!] as const;
+        }
+        return [url, fallback] as const;
+      } catch {
         return [url, fallback] as const;
       }
-    }
-    const title = await fetchHtmlTitle(response);
-    if (!unusableTitle(title)) return [url, title!] as const;
-    for (const fetcher of [fetchOgFetchTitle, fetchMicrolinkTitle, fetchJinaTitle]) {
-      try {
-        const alternateTitle = await fetcher(url);
-        if (!unusableTitle(alternateTitle)) return [url, alternateTitle!] as const;
-      } catch {
-        // Continue through the metadata fallback chain.
-      }
-    }
-    if (options.searchUrl) {
-      const searchResults = await webSearch(url, {
-        url: options.searchUrl,
-        token: options.searchToken,
-        count: 1,
-      });
-      const searchTitle = searchResults[0]?.title;
-      if (!unusableTitle(searchTitle)) return [url, searchTitle!] as const;
-    }
-    return [url, fallback] as const;
-  } catch {
-    return [url, fallback] as const;
-  }
-  }));
+    }),
+  );
   return new Map(entries);
 }

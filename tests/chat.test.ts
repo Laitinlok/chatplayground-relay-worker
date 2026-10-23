@@ -90,8 +90,13 @@ async function envelope(res: Response) {
 
 /** The chat call is always the fetch after the catalogue fetch. */
 function chatCall(): [string, RequestInit] {
-  const calls = vi.mocked(fetch).mock.calls.filter(([url]) => String(url).includes("/api/chat/"));
-  return (calls.at(-1) ?? vi.mocked(fetch).mock.calls[1]) as [string, RequestInit];
+  const calls = vi
+    .mocked(fetch)
+    .mock.calls.filter(([url]) => String(url).includes("/api/chat/"));
+  return (calls.at(-1) ?? vi.mocked(fetch).mock.calls[1]) as [
+    string,
+    RequestInit,
+  ];
 }
 
 beforeEach(() => resetModelCache());
@@ -187,78 +192,327 @@ describe("POST /v1/chat/completions — upstream failures", () => {
 });
 
 describe("POST /v1/chat/completions — delegated search tools", () => {
-  it("returns web_search tool calls to the OpenAI-compatible client", async () => {
-    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(
-      async (input: RequestInfo | URL, init?: RequestInit) => {
+  it.each([false, true])(
+    "leaves document tool selection to the model (stream=%s)",
+    async (stream) => {
+      let prompt = "";
+      vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+        if (String(input).endsWith("/api/models")) return Response.json(FEED);
+        const body = JSON.parse(String(init?.body)) as {
+          messages: Array<{ content: string }>;
+        };
+        prompt = body.messages.map((message) => message.content).join("\n");
+        return new Response(
+          `<TOOL_CALL>\ntool: create_document\nparams: {"title":"Report"}\n</TOOL_CALL>${CHAT_ID}`,
+        );
+      });
+      const res = await post({
+        ...hello,
+        stream,
+        tool_choice: "auto",
+        messages: [
+          { role: "user", content: "Create a document about our project." },
+        ],
+        tools: [
+          {
+            type: "function",
+            function: {
+              name: "create_document",
+              parameters: {
+                type: "object",
+                properties: { title: { type: "string" } },
+                required: ["title"],
+              },
+            },
+          },
+        ],
+      });
+      expect(res.status).toBe(200);
+      expect(prompt).toContain(
+        "Call a tool only when its result is required. Otherwise answer directly.",
+      );
+      expect(prompt).not.toContain("You must call exactly one listed tool.");
+      if (stream) {
+        const events = await res.text();
+        expect(events).toContain('"tool_calls"');
+        expect(events).toContain('"create_document"');
+      } else {
+        const payload = (await res.json()) as ChatCompletionResponse;
+        expect(payload.choices[0]?.message.tool_calls?.[0]?.function.name).toBe(
+          "create_document",
+        );
+      }
+    },
+  );
+
+  it.each([
+    "Latest TikTok food hacks",
+    "recent AI model release",
+    "live weather in Tokyo",
+    "verify the current exchange rate",
+  ])(
+    "forces the advertised search tool for fresh or verifiable information: %s",
+    async (prompt) => {
+      let upstreamCalls = 0;
+      vi.spyOn(globalThis, "fetch").mockImplementation(
+        async (input: RequestInfo | URL) => {
+          const url = String(input);
+          if (url.endsWith("/api/models")) return Response.json(FEED);
+          upstreamCalls += 1;
+          return new Response(
+            `<TOOL_CALL>\ntool: web-browsing\nparams: {"query":"${prompt}"}\n</TOOL_CALL>${CHAT_ID}`,
+          );
+        },
+      );
+      const res = await post({
+        ...hello,
+        messages: [{ role: "user", content: prompt }],
+        tools: [
+          {
+            type: "function",
+            function: {
+              name: "web-browsing",
+              parameters: {
+                type: "object",
+                properties: { query: { type: "string" } },
+                required: ["query"],
+              },
+            },
+          },
+        ],
+      });
+      const payload = (await res.json()) as ChatCompletionResponse;
+      expect(res.status).toBe(200);
+      expect(payload.choices[0]?.finish_reason).toBe("tool_calls");
+      expect(payload.choices[0]?.message.tool_calls?.[0]?.function.name).toBe(
+        "web-browsing",
+      );
+      expect(upstreamCalls).toBe(0);
+    },
+  );
+
+  it.each([false, true])(
+    "uses AnythingLLM's actual web-browsing name (stream=%s)",
+    async (stream) => {
+      const fetchMock = vi
+        .spyOn(globalThis, "fetch")
+        .mockImplementation(async (input: RequestInfo | URL) => {
+          const url = String(input);
+          if (url.endsWith("/api/models")) return Response.json(FEED);
+          expect(url).toContain("/api/chat/");
+          return new Response(
+            '<TOOL_CALL>\ntool: web_search\nparams: {"query":"latest food"}\n</TOOL_CALL>' +
+              CHAT_ID,
+          );
+        });
+      const res = await post({
+        ...hello,
+        stream,
+        messages: [{ role: "user", content: "Find food" }],
+        tools: [
+          {
+            type: "function",
+            function: {
+              name: "web-browsing",
+              description: "Search the internet",
+              parameters: {
+                $schema: "http://json-schema.org/draft-07/schema#",
+                type: "object",
+                properties: {
+                  query: { type: "string", description: "A search query." },
+                },
+                additionalProperties: false,
+              },
+            },
+          },
+          {
+            type: "function",
+            function: {
+              name: "web-scraping",
+              parameters: {
+                type: "object",
+                properties: { url: { type: "string" } },
+              },
+            },
+          },
+        ],
+      });
+      expect(res.status).toBe(200);
+      if (stream) {
+        const events = (await res.text())
+          .split("\n\n")
+          .filter((event) => event.startsWith("data: {"))
+          .map((event) => JSON.parse(event.slice(6)));
+        const call = events.flatMap(
+          (event) => event.choices[0].delta.tool_calls ?? [],
+        )[0];
+        expect(call.function).toEqual({
+          name: "web-browsing",
+          arguments: '{"query":"latest food"}',
+        });
+        expect(events.at(-1).choices[0].finish_reason).toBe("tool_calls");
+      } else {
+        const payload = (await res.json()) as ChatCompletionResponse;
+        expect(payload.choices[0]?.message.tool_calls?.[0]?.function).toEqual({
+          name: "web-browsing",
+          arguments: '{"query":"latest food"}',
+        });
+      }
+      expect(
+        fetchMock.mock.calls.filter(([url]) =>
+          String(url).includes("/api/chat/"),
+        ).length,
+      ).toBe(1);
+    },
+  );
+  it("returns the advertised search name when upstream emits web_search", async () => {
+    upstream(
+      () =>
+        new Response(
+          '<TOOL_CALL>\ntool: web_search\nparams: {"query":"latest food"}\n</TOOL_CALL>' +
+            CHAT_ID,
+        ),
+    );
+    const res = await post({
+      ...hello,
+      messages: [{ role: "user", content: "Find food" }],
+      tools: [
+        {
+          type: "function",
+          function: {
+            name: "web_browse",
+            parameters: {
+              type: "object",
+              properties: { search_query: { type: "string" } },
+              required: ["search_query"],
+            },
+          },
+        },
+      ],
+    });
+    const payload = (await res.json()) as ChatCompletionResponse;
+    expect(res.status).toBe(200);
+    expect(payload.choices[0]?.message.tool_calls?.[0]?.function).toEqual({
+      name: "web_browse",
+      arguments: '{"search_query":"latest food"}',
+    });
+  });
+
+  it("does not inject web_search when the client offers only a scraper", async () => {
+    upstream(() => new Response(`No search tool available.${CHAT_ID}`));
+    const res = await post({
+      ...hello,
+      tools: [
+        {
+          type: "function",
+          function: {
+            name: "web-scraping",
+            parameters: {
+              type: "object",
+              properties: { url: { type: "string" } },
+              required: ["url"],
+            },
+          },
+        },
+      ],
+    });
+    expect(res.status).toBe(200);
+    const payload = (await res.json()) as ChatCompletionResponse;
+    expect(payload.choices[0]?.message.tool_calls).toBeUndefined();
+    const request = JSON.parse(String(chatCall()[1].body));
+    expect(JSON.stringify(request.messages)).not.toContain("## web_search");
+  });
+  it("returns a web_search tool call for the client to execute", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (input: RequestInfo | URL) => {
         const url = String(input);
         if (url.endsWith("/api/models")) return Response.json(FEED);
         return new Response(
           `<TOOL_CALL>\ntool: web_search\nparams:\n{"query":"latest TikTok food hacks","max_results":5}\n</TOOL_CALL>${CHAT_ID}`,
         );
-      },
-    );
+      });
 
-    const res = await post(
-      {
-        ...hello,
-        messages: [{ role: "user", content: "Latest TikTok food hacks" }],
-        tools: [{ type: "web_search_preview" }],
-      },
-      { ...env, CLOUDFLARE_SEARCH_URL: "https://search.example.test" },
-    );
+    const res = await post({
+      ...hello,
+      messages: [{ role: "user", content: "Latest TikTok food hacks" }],
+      tools: [{ type: "web_search_preview" }],
+    });
 
     expect(res.status).toBe(200);
     const payload = (await res.json()) as ChatCompletionResponse;
     expect(payload.choices[0]?.finish_reason).toBe("tool_calls");
     expect(payload.choices[0]?.message.tool_calls?.[0]).toMatchObject({
-      type: "function",
       function: {
         name: "web_search",
         arguments: JSON.stringify({
-          query: "latest TikTok food hacks",
-          max_results: 5,
+          query: "Latest TikTok food hacks",
         }),
       },
     });
-    expect(fetchMock.mock.calls.some(([url]) => String(url) === "https://search.example.test/search")).toBe(false);
-    expect(fetchMock.mock.calls.filter(([url]) => String(url).includes("/api/chat/")).length).toBe(1);
+    expect(
+      fetchMock.mock.calls.filter(([url]) => String(url).includes("/api/chat/"))
+        .length,
+    ).toBe(0);
   });
 
-  it("forces web_search when Luna answers a latest-news prompt in prose", async () => {
-    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: RequestInfo | URL) => {
-      const url = String(input);
-      if (url.endsWith("/api/models")) return Response.json(FEED);
-      return new Response(`Here is what I remember.${CHAT_ID}`);
-    });
+  it("leaves current-news tool selection to the model", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/api/models")) return Response.json(FEED);
+        return new Response(`Here is what I remember.${CHAT_ID}`);
+      },
+    );
     const res = await post({
       ...hello,
       messages: [{ role: "user", content: "latest AI news" }],
       tools: [{ type: "function", function: { name: "web_search" } }],
     });
     const payload = (await res.json()) as ChatCompletionResponse;
-    expect(payload.choices[0]?.finish_reason).toBe("tool_calls");
-    expect(payload.choices[0]?.message.tool_calls?.[0]?.function.name).toBe("web_search");
-    const calls = vi.mocked(fetch).mock.calls.filter(([url]) => String(url).includes("/api/chat/"));
+    expect(payload.choices[0]?.finish_reason).toBe("stop");
+    expect(payload.choices[0]?.message.tool_calls).toBeUndefined();
+    const calls = vi
+      .mocked(fetch)
+      .mock.calls.filter(([url]) => String(url).includes("/api/chat/"));
     const real = JSON.parse(String(calls.at(-1)?.[1]?.body));
-    expect(JSON.stringify(real.messages)).toContain("must call web_search");
+    expect(JSON.stringify(real.messages)).not.toContain("must call web_search");
   });
 
   it("replaces an I'll-check reply with the follow-up answer when a tool result exists", async () => {
     let chats = 0;
-    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: RequestInfo | URL) => {
-      const url = String(input);
-      if (url.endsWith("/api/models")) return Response.json(FEED);
-      chats += 1;
-      return new Response(chats === 1
-        ? `I’ll check current coverage and distinguish the popular hacks.${CHAT_ID}`
-        : `The popular hack is freezing grapes.${CHAT_ID}`);
-    });
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/api/models")) return Response.json(FEED);
+        chats += 1;
+        return new Response(
+          chats === 1
+            ? `I’ll check current coverage and distinguish the popular hacks.${CHAT_ID}`
+            : `The popular hack is freezing grapes.${CHAT_ID}`,
+        );
+      },
+    );
     const res = await post({
       ...hello,
       messages: [
         { role: "user", content: "What food hacks are popular?" },
-        { role: "assistant", content: null, tool_calls: [{ id: "call_1", type: "function", function: { name: "web_search", arguments: "{}" } }] },
-        { role: "tool", tool_call_id: "call_1", content: "Freezing grapes is the popular hack." },
+        {
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            {
+              id: "call_1",
+              type: "function",
+              function: { name: "web_search", arguments: "{}" },
+            },
+          ],
+        },
+        {
+          role: "tool",
+          tool_call_id: "call_1",
+          content: "Freezing grapes is the popular hack.",
+        },
       ],
       tools: [{ type: "function", function: { name: "web_search" } }],
     });
@@ -267,18 +521,18 @@ describe("POST /v1/chat/completions — delegated search tools", () => {
     expect(payload.choices[0]?.message.content).toContain("freezing grapes");
   });
 
-
-
   it("does not return incomplete TOOL_CALL XML after a failed gate retry", async () => {
     let chats = 0;
-    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: RequestInfo | URL) => {
-      const url = String(input);
-      if (url.endsWith("/api/models")) return Response.json(FEED);
-      chats += 1;
-      return new Response(
-        `<TOOL_CALL> tool: edit_existing_file params: {"filepath":"utils/searchBrave.js","changes":"function parseBraveData(source) {\n if (source.startsWith("[")) {\n let output = "";"}${CHAT_ID}`,
-      );
-    });
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/api/models")) return Response.json(FEED);
+        chats += 1;
+        return new Response(
+          `<TOOL_CALL> tool: edit_existing_file params: {"filepath":"utils/searchBrave.js","changes":"function parseBraveData(source) {\n if (source.startsWith("[")) {\n let output = "";"}${CHAT_ID}`,
+        );
+      },
+    );
     const res = await post({
       ...hello,
       messages: [{ role: "user", content: "Fix searchBrave.js" }],
@@ -303,20 +557,24 @@ describe("POST /v1/chat/completions — delegated search tools", () => {
     expect(res.status).toBe(200);
     expect(payload.choices?.[0]?.finish_reason).toBe("stop");
     expect(payload.choices?.[0]?.message.tool_calls).toBeUndefined();
-    expect(String(payload.choices?.[0]?.message.content ?? "")).not.toMatch(/<TOOL_CALL\b/i);
-    expect(String(payload.choices?.[0]?.message.content ?? "")).toMatch(/invalid|retry/i);
+    expect(String(payload.choices?.[0]?.message.content ?? "")).not.toMatch(
+      /<TOOL_CALL\b/i,
+    );
+    expect(String(payload.choices?.[0]?.message.content ?? "")).toMatch(
+      /invalid|retry/i,
+    );
     expect(chats).toBeGreaterThan(1);
   });
 
-
   it("does not retry the gate when a valid tool call already exists", async () => {
     let chats = 0;
-    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: RequestInfo | URL) => {
-      const url = String(input);
-      if (url.endsWith("/api/models")) return Response.json(FEED);
-      chats += 1;
-      return new Response(
-        `<TOOL_CALL>
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/api/models")) return Response.json(FEED);
+        chats += 1;
+        return new Response(
+          `<TOOL_CALL>
 tool: web_search
 params:
 {"query":"ok"}
@@ -327,11 +585,13 @@ tool: not_a_real_tool
 params:
 {}
 </TOOL_CALL>${CHAT_ID}`,
-      );
-    });
+        );
+      },
+    );
     const res = await post({
       ...hello,
       messages: [{ role: "user", content: "search" }],
+      tool_choice: { type: "function", function: { name: "web_search" } },
       tools: [
         {
           type: "function",
@@ -348,29 +608,34 @@ params:
     });
     const payload = (await res.json()) as ChatCompletionResponse;
     expect(payload.choices[0]?.finish_reason).toBe("tool_calls");
-    expect(payload.choices[0]?.message.content).toBe("");
-    expect(payload.choices[0]?.message.tool_calls?.[0]?.function.name).toBe("web_search");
+    expect(payload.choices[0]?.message.content).toBeNull();
+    expect(payload.choices[0]?.message.tool_calls?.[0]?.function.name).toBe(
+      "web_search",
+    );
     expect(chats).toBe(1);
   });
 
   it("retries once when the tool gate rejects a wrong tool call", async () => {
     let chats = 0;
-    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: RequestInfo | URL) => {
-      const url = String(input);
-      if (url.endsWith("/api/models")) return Response.json(FEED);
-      chats += 1;
-      if (chats === 1) {
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/api/models")) return Response.json(FEED);
+        chats += 1;
+        if (chats === 1) {
+          return new Response(
+            `<TOOL_CALL>\ntool: not_a_real_tool\nparams:\n{}\n</TOOL_CALL>${CHAT_ID}`,
+          );
+        }
         return new Response(
-          `<TOOL_CALL>\ntool: not_a_real_tool\nparams:\n{}\n</TOOL_CALL>${CHAT_ID}`,
+          `<TOOL_CALL>\ntool: web_search\nparams:\n{"query":"food hacks"}\n</TOOL_CALL>${CHAT_ID}`,
         );
-      }
-      return new Response(
-        `<TOOL_CALL>\ntool: web_search\nparams:\n{"query":"food hacks"}\n</TOOL_CALL>${CHAT_ID}`,
-      );
-    });
+      },
+    );
     const res = await post({
       ...hello,
       messages: [{ role: "user", content: "TikTok food hacks" }],
+      tool_choice: { type: "function", function: { name: "web_search" } },
       tools: [
         {
           type: "function",
@@ -387,7 +652,9 @@ params:
     });
     const payload = (await res.json()) as ChatCompletionResponse;
     expect(payload.choices[0]?.finish_reason).toBe("tool_calls");
-    expect(payload.choices[0]?.message.tool_calls?.[0]?.function.name).toBe("web_search");
+    expect(payload.choices[0]?.message.tool_calls?.[0]?.function.name).toBe(
+      "web_search",
+    );
     expect(chats).toBeGreaterThan(1);
     const retryBody = JSON.parse(
       String(
@@ -397,23 +664,29 @@ params:
           .at(-1)?.[1]?.body,
       ),
     );
-    expect(JSON.stringify(retryBody.messages)).toContain("rejected by the tool gate");
+    expect(JSON.stringify(retryBody.messages)).toContain(
+      "rejected by the tool gate",
+    );
   });
 
-  it("replaces a search refusal with a web_search tool call", async () => {
-    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: RequestInfo | URL) => {
-      const url = String(input);
-      if (url.endsWith("/api/models")) return Response.json(FEED);
-      return new Response(`I’ll check current coverage and distinguish genuinely popular hacks from listicle-style trend claims.${CHAT_ID}`);
-    });
+  it("does not force a search for a generic query", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/api/models")) return Response.json(FEED);
+        return new Response(
+          `I’ll check current coverage and distinguish genuinely popular hacks from listicle-style trend claims.${CHAT_ID}`,
+        );
+      },
+    );
     const res = await post({
       ...hello,
       messages: [{ role: "user", content: "TikTok food hacks" }],
       tools: [{ type: "function", function: { name: "web_search" } }],
     });
     const payload = (await res.json()) as ChatCompletionResponse;
-    expect(payload.choices[0]?.finish_reason).toBe("tool_calls");
-    expect(payload.choices[0]?.message.tool_calls?.[0]?.function.arguments).toContain("TikTok food hacks");
+    expect(payload.choices[0]?.finish_reason).toBe("stop");
+    expect(payload.choices[0]?.message.tool_calls).toBeUndefined();
   });
 });
 
@@ -494,7 +767,11 @@ describe("POST /v1/chat/completions — upstream request", () => {
     expect(request.messages[0]?.role).toBe("user");
     expect(String(request.messages[0]?.content)).toContain("Hello");
     expect(JSON.stringify(request.messages)).not.toContain("<think>");
-    expect(request.messages.some((message: { role: string }) => message.role === "assistant")).toBe(false);
+    expect(
+      request.messages.some(
+        (message: { role: string }) => message.role === "assistant",
+      ),
+    ).toBe(false);
     expect(request.reasoning_effort).toBe("medium");
   });
 
@@ -502,7 +779,15 @@ describe("POST /v1/chat/completions — upstream request", () => {
     upstream(() => new Response(`ok${CHAT_ID}`));
     await post({
       ...hello,
-      tools: [{ type: "function", function: { name: "cron", parameters: { type: "object", properties: {} } } }],
+      tools: [
+        {
+          type: "function",
+          function: {
+            name: "cron",
+            parameters: { type: "object", properties: {} },
+          },
+        },
+      ],
     });
     const request = JSON.parse(String(chatCall()[1].body));
     expect(request.reasoning_effort).toBe("none");
@@ -559,7 +844,6 @@ describe("POST /v1/chat/completions — upstream request", () => {
     expect(request.messages[0].content).toContain("<AVAILABLE_TOOLS>");
   });
 });
-
 
 describe("POST /v1/chat/completions — streaming", () => {
   /** Every `data:` payload of an SSE response, `[DONE]` included. */

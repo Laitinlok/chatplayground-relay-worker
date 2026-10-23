@@ -6,7 +6,12 @@
 
 export type UpstreamEndpoint = "azure" | "perplexity" | "lmsys" | "image";
 
-const KNOWN: ReadonlySet<string> = new Set(["azure", "perplexity", "lmsys", "image"]);
+const KNOWN: ReadonlySet<string> = new Set([
+  "azure",
+  "perplexity",
+  "lmsys",
+  "image",
+]);
 
 export function toEndpoint(raw: string): UpstreamEndpoint {
   // ponytail: unknown endpoint → lmsys catch-all, matches upstream's routing

@@ -147,7 +147,8 @@ describe("Agora reasoning SSE compatibility", () => {
     expect(
       deltas.some(
         (delta) =>
-          delta.content === "<think>\nprivate reasoning\n</think>\npublic answer",
+          delta.content ===
+          "<think>\nprivate reasoning\n</think>\npublic answer",
       ),
     ).toBe(true);
   });

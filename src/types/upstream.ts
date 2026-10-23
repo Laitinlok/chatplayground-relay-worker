@@ -32,6 +32,7 @@ interface UpstreamBodyBase {
   promptTemplate: null;
   fileUrl: null;
   botId: string; // short id, e.g. "perplexity-sonar"
+  submissionId: string;
   noSave: boolean;
   reasoning_effort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
   verbosity?: "low" | "medium" | "high";

@@ -1,4 +1,3 @@
-
 export interface Env {
   // Vars from wrangler.jsonc
   UPSTREAM_CHAT_URL: string;
@@ -13,6 +12,9 @@ export interface Env {
   // are sent without a token (the search endpoint must allow unauthenticated access).
   CLOUDFLARE_SEARCH_URL?: string;
   CLOUDFLARE_SEARCH_TOKEN?: string;
+  // Opt-in request-shape diagnostic. Never enable in normal production traffic:
+  // it logs user prompts to Workers Logs for integration troubleshooting.
+  DEBUG_REQUEST_LOGS?: string;
 
   // Gateway auth (optional — set via `wrangler secret put`). When RELAY_API_KEY
   // is set, callers present it instead of a session token and the worker mints
