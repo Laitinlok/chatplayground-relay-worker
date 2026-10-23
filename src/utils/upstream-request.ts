@@ -233,30 +233,79 @@ export function buildUpstreamRequest(
   }
 }
 
-function splitUpstreamMessage(
-  role: UpstreamMessage["role"],
-  content: string,
-): UpstreamMessage[] {
-  if (content.length <= MAX_UPSTREAM_MESSAGE_CHARS) {
-    return [{ role, content }];
+const ROLE_LABEL: Record<UpstreamMessage["role"], string> = {
+  system: "System",
+  user: "User",
+  assistant: "Assistant",
+};
+
+/** Collapse the local transcript to the single message accepted upstream. */
+function collapseHistory(messages: UpstreamMessage[]): UpstreamMessage[] {
+  if (messages.length === 1) {
+    const only = messages[0];
+    return only ? [only] : [{ role: "user", content: "" }];
   }
 
-  const chunks: UpstreamMessage[] = [];
- for (let offset = 0; offset < content.length; ) {
- let end = Math.min(offset + MAX_UPSTREAM_MESSAGE_CHARS, content.length);
- // Keep UTF-16 surrogate pairs intact at chunk boundaries.
- const lastCode = content.charCodeAt(end - 1);
- const nextCode = content.charCodeAt(end);
- if (
- lastCode >= 0xd800 &&
- lastCode <= 0xdbff &&
- nextCode >= 0xdc00 &&
- nextCode <= 0xdfff
- ) end--;
- chunks.push({ role, content: content.slice(offset, end) });
- offset = end;
- }
- return chunks;
+  const parts: UpstreamContentPart[] = [];
+  for (const [index, message] of messages.entries()) {
+    if (index > 0) parts.push({ type: "text", text: "\\n\\n" });
+    const label =
+      message.role === "user" &&
+      typeof message.content === "string" &&
+      message.content.startsWith("<TOOL_RESULT>")
+        ? "Tool"
+        : ROLE_LABEL[message.role];
+    parts.push({ type: "text", text: `${label}:` });
+    if (typeof message.content === "string") {
+      parts.push({ type: "text", text: ` ${message.content}` });
+    } else {
+      parts.push(...message.content);
+    }
+  }
+
+  const transcript: string | UpstreamContentPart[] = parts.every(
+    (part) => part.type === "text",
+  )
+    ? parts.map((part) => (part as UpstreamContentPartText).text).join("")
+    : parts;
+  return [{ role: "user", content: boundTranscript(transcript) }];
+}
+
+/** Keep the newest context within the upstream per-message size limit. */
+function boundTranscript(
+  content: string | UpstreamContentPart[],
+): string | UpstreamContentPart[] {
+  if (typeof content === "string") {
+    if (content.length <= MAX_UPSTREAM_MESSAGE_CHARS) return content;
+    let start = content.length - MAX_UPSTREAM_MESSAGE_CHARS;
+    const firstCode = content.charCodeAt(start);
+    if (firstCode >= 0xdc00 && firstCode <= 0xdfff) start++;
+    return content.slice(start);
+  }
+
+  let remaining = MAX_UPSTREAM_MESSAGE_CHARS;
+  const kept: UpstreamContentPart[] = [];
+  for (let i = content.length - 1; i >= 0 && remaining > 0; i--) {
+    const part = content[i];
+    if (!part) continue;
+    if (part.type === "text") {
+      let text = part.text;
+      if (text.length > remaining) {
+        text = text.slice(text.length - remaining);
+        const firstCode = text.charCodeAt(0);
+        if (firstCode >= 0xdc00 && firstCode <= 0xdfff) text = text.slice(1);
+      }
+      kept.push({ type: "text", text });
+      remaining -= text.length;
+    } else {
+      const size = JSON.stringify(part).length;
+      if (size <= remaining) {
+        kept.push(part);
+        remaining -= size;
+      }
+    }
+  }
+  return kept.reverse();
 }
 
 export function endpointUrl(
