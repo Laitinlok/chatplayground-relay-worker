@@ -32,7 +32,7 @@ function toolNameSuggestsSearch(name: string): boolean {
   const normalized = name.toLowerCase().replace(/[^a-z0-9]+/g, "_");
   if (/(?:conversation|rag|memory|knowledge|document|vector|semantic)/i.test(normalized))
     return false;
-  return /(?:^|_)(?:web_search|search_web|web_browsing|browsing|duckduckgo|ddg)(?:_|$)/i.test(
+  return /(?:^|_)(?:web|search|browsing|duckduckgo|ddg)(?:_|$)/i.test(
     normalized,
   );
 }
