@@ -157,7 +157,7 @@ describe("buildUpstreamRequest — field mapping", () => {
     expect(body.messages).toEqual([
       {
         role: "user",
-        content: "System: Follow these rules.\\n\\nAssistant:\\n\\nUser: hi",
+        content: "System: Follow these rules.\n\nAssistant:\n\nUser: hi",
       },
     ]);
   });
@@ -249,9 +249,8 @@ describe("buildUpstreamRequest — field mapping", () => {
     const systemNotes = body.messages
       .map((message) => String(message.content))
       .join("\n");
-    expect(systemNotes).toMatch(
-      /System: .*Continue the user's task|edit\/write\/replace/i,
-    );
+    expect(systemNotes).toContain("System: A <TOOL_RESULT> is above.");
+    expect(systemNotes).toContain("edit/write/replace tool is still needed");
     expect(systemNotes).not.toMatch(/Do not announce another search/i);
   });
 
