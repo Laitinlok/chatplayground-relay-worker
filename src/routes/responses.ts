@@ -1222,11 +1222,8 @@ responses.post("/v1/responses", async (c) => {
           clientSearchTools,
         );
         if (fallbackCall) fallbackToolCalls.push(fallbackCall);
-        // Keep one hosted-search item for the failed operation. When an
-        // earlier parallel search succeeded, that item already records the
-        // hosted-search status for compatible clients.
-        if (searches.length === 0)
-          searches.push({ query: item.query, results: [] });
+        // A failed hosted search is handed to the caller's function; it must
+        // not be represented as a completed OpenAI-hosted search.
         continue;
       }
       searches.push({ query: item.query, results: item.results });
