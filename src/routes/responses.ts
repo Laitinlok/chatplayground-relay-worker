@@ -897,14 +897,14 @@ responses.post("/v1/responses", async (c) => {
           );
           // Failed hosted search is handed back to the caller's function without an empty hosted-search item.
           return raw.stream
-            ? new Response(streamResponse(fallbackResult, fallbackCall), {
+            ? new Response(streamResponse(fallbackBase, fallbackCall), {
                 headers: {
                   "content-type": "text/event-stream; charset=utf-8",
                   "cache-control": "no-cache, no-transform",
                   "x-should-retry": "false",
                 },
               })
-            : Response.json(fallbackResult, {
+            : Response.json(fallbackBase, {
                 headers: { "x-should-retry": "false" },
               });
         }
