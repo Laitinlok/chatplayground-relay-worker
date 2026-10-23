@@ -373,6 +373,7 @@ params: {"query":"help me find something"}
     expect(payload.output?.some((item) => item.type === "function_call")).toBe(
       true,
     );
+    expect(JSON.stringify(payload)).not.toContain("OpenAI web search source");
   });
 
   it("returns a caller's custom search function without starting hosted search", async () => {
