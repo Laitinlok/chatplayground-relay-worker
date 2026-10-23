@@ -334,7 +334,10 @@ describe("POST /v1/responses — Luna reliability", () => {
       if (url.endsWith("/api/models")) return Response.json(FEED);
       if (url.includes("/api/chat/")) {
         return new Response(
-          `<TOOL_CALL>\\ntool: web_search\\nparams: {"query":"help me find something"}\\n</TOOL_CALL>${CHAT_ID}`,
+          `<TOOL_CALL>
+tool: web_search
+params: {"query":"help me find something"}
+</TOOL_CALL>${CHAT_ID}`,
         );
       }
       return new Response("Unavailable", { status: 503 });
