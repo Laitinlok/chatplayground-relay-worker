@@ -4,6 +4,7 @@ import {
   isFetchTool,
   prioritizeSearchTools,
   createSearchToolCall,
+  rankToolsByEmbedding,
 } from "../src/utils/tool-selector";
 import type { OpenAITool } from "../src/utils/tool-shim";
 
@@ -13,6 +14,54 @@ function tool(name: string, properties: Record<string, unknown>): OpenAITool {
     function: { name, parameters: { type: "object", properties } },
   };
 }
+
+describe("embedding-assisted tool ranking", () => {
+  it("ranks relevant tools and reports a confident match", async () => {
+    const relevant = tool("create_calendar_event", {
+      title: { type: "string" },
+    });
+    const unrelated = tool("search_memories", {
+      query: { type: "string" },
+    });
+    const ai = {
+      run: async (_model: string, input: { text: string[] }) => {
+        expect(input.text).toHaveLength(3);
+        return { data: [[1, 0], [0.98, 0.1], [0.1, 0.99]] };
+      },
+    };
+
+    const ranked = await rankToolsByEmbedding(
+      "Schedule a meeting for tomorrow",
+      [unrelated, relevant],
+      ai,
+    );
+    expect(ranked?.tools.map((item) => item.function.name)).toEqual([
+      "search_memories",
+      "create_calendar_event",
+    ]);
+    expect(ranked?.confident).toBe(true);
+  });
+
+  it("leaves ambiguous rankings and embedding failures to normal routing", async () => {
+    const tools = [
+      tool("create_event", { title: { type: "string" } }),
+      tool("update_event", { id: { type: "string" } }),
+    ];
+    const ambiguous = await rankToolsByEmbedding(
+      "Change the event",
+      tools,
+      { run: async () => ({ data: [[1, 0], [0.9, 0.1], [0.9, 0.1]] }) },
+    );
+    expect(ambiguous?.confident).toBe(false);
+    await expect(
+      rankToolsByEmbedding("Change the event", tools, {
+        run: async () => {
+          throw new Error("AI unavailable");
+        },
+      }),
+    ).resolves.toBeNull();
+  });
+});
 
 describe("web tool classification", () => {
   it.each([
