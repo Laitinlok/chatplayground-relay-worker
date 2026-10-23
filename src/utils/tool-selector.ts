@@ -30,7 +30,7 @@ function parameterNames(tool: OpenAITool): string[] {
 
 function toolNameSuggestsSearch(name: string): boolean {
   const normalized = name.toLowerCase().replace(/[^a-z0-9]+/g, "_");
-  if (/(?:^|_)(?:conversation|rag|memory|memories|knowledge|document|vector|semantic)(?:_|$)/i.test(normalized))
+  if (/(?:^|_)(?:conversation|conversations|rag|memory|memories|knowledge|document|vector|semantic)(?:_|$)/i.test(normalized))
     return false;
   return /(?:^|_)(?:web|search|browsing|duckduckgo|ddg)(?:_|$)/i.test(
     normalized,
