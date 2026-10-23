@@ -39,6 +39,11 @@ describe("parseTrailers", () => {
     expect(out.chatId).toBe(CUID);
   });
 
+  it("strips a leading CHAT_ID sentinel with a real newline", () => {
+    const out = parseTrailers(`CHAT_ID:${CUID}\nHi back!`);
+    expect(out).toEqual({ content: "Hi back!", chatId: CUID, citations: [] });
+  });
+
   it("strips a mid-response CHAT_ID sentinel and preserves following prose", () => {
     const out = parseTrailers(`before CHAT_ID:${CUID} after`);
     expect(out.content).toBe("before  after");
