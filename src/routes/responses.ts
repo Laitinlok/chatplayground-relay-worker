@@ -342,12 +342,6 @@ export function streamResponse(
       const send = (type: string, data: Record<string, unknown>) =>
         event(type, data, sequenceNumber++);
       const response = { ...result, status: "in_progress" };
-      const search = result.output.find(
-        (item) => item.type === "web_search_call",
-      );
-      const sourceStatus = search
-        ? `${search.results.length} OpenAI web search source${search.results.length === 1 ? "" : "s"} found`
-        : null;
       controller.enqueue(
         encoder.encode(
           send("response.created", {
@@ -364,18 +358,6 @@ export function streamResponse(
           }),
         ),
       );
-      if (sourceStatus) {
-        controller.enqueue(
-          encoder.encode(
-            send("response.output_text.delta", {
-              type: "response.output_text.delta",
-              output_index: 0,
-              content_index: 0,
-              delta: `\n\n*${sourceStatus}; generating answer…*`,
-            }),
-          ),
-        );
-      }
       for (const [outputIndex, output] of result.output.entries()) {
         if (output.type !== "web_search_call") continue;
         const item = { ...output, status: "in_progress" };
@@ -1528,12 +1510,8 @@ responses.post("/v1/responses", async (c) => {
     : resultWithCitations;
   const responseToolCall = fallbackToolCalls[0] ?? toolCall;
   if (fallbackToolCalls.length > 0) {
-    const fallbackResult = addHostedWebSearches(
-      baseResult,
-      searches.length > 0 ? searches : [{ query: latestUserText, results: [] }],
-    );
     if (raw.stream) {
-      return new Response(streamResponse(fallbackResult, responseToolCall), {
+      return new Response(streamResponse(baseResult, responseToolCall), {
         headers: {
           "content-type": "text/event-stream; charset=utf-8",
           "cache-control": "no-cache, no-transform",
@@ -1541,7 +1519,7 @@ responses.post("/v1/responses", async (c) => {
         },
       });
     }
-    return Response.json(fallbackResult, {
+    return Response.json(baseResult, {
       headers: { "x-should-retry": "false" },
     });
   }
