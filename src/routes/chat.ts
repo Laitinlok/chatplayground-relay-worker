@@ -96,7 +96,8 @@ function logRequestShape(body: ChatCompletionRequest): void {
 async function chatCacheKey(
   sessionToken: string,
   modelId: string,
-  conversationId?: string,
+  deploymentVersion: string,
+ conversationId?: string,
 ): Promise<string> {
   const digest = await crypto.subtle.digest(
     "SHA-256",
@@ -105,8 +106,8 @@ async function chatCacheKey(
   const sessionHash = Array.from(new Uint8Array(digest), (byte) =>
     byte.toString(16).padStart(2, "0"),
   ).join("");
-  const versionId = envVersionIdPlaceholder;
- return `chat:${versionId}:${conversationId ?? `${sessionHash}:${modelId}`}`;
+ 
+ return `chat:${deploymentVersion}:${conversationId ?? `${sessionHash}:${modelId}`}`;
 }
 
 async function loadCachedChatId(env: Env, key: string): Promise<string | null> {
@@ -154,7 +155,13 @@ chat.post("/v1/chat/completions", async (c) => {
   // and there's a cached chatId for this conversation. This avoids spending
   // a brand-new chatplayground chat (and quota) on every single request.
   const conversationId = c.req.header("x-conversation-id") ?? undefined;
-  const cacheKey = await chatCacheKey(sessionToken, model.id, conversationId);
+  const deploymentVersion = c.env.CF_VERSION_METADATA?.id ?? "local";
+ const cacheKey = await chatCacheKey(
+ sessionToken,
+ model.id,
+ deploymentVersion,
+ conversationId,
+ );
 
   if (!promptOnlyAgent && !body.user) {
     const cachedChatId = await loadCachedChatId(c.env, cacheKey);
