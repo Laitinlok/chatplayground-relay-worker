@@ -328,6 +328,50 @@ describe("POST /v1/responses — Luna reliability", () => {
     expect(body).not.toContain("OpenAI web search source");
   });
 
+  it("returns the client search function when a hosted call fails after model selection", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/api/models")) return Response.json(FEED);
+      if (url.includes("/api/chat/")) {
+        return new Response(
+          `<TOOL_CALL>\\ntool: web_search\\nparams: {"query":"help me find something"}\\n</TOOL_CALL>${CHAT_ID}`,
+        );
+      }
+      return new Response("Unavailable", { status: 503 });
+    });
+
+    const res = await post(
+      {
+        model: "gpt-6-luna",
+        input: "help me find something",
+        tools: [
+          { type: "web_search" },
+          {
+            type: "function",
+            name: "search_news",
+            parameters: {
+              type: "object",
+              properties: { query: { type: "string" } },
+              required: ["query"],
+            },
+          },
+        ],
+      },
+      { ...env, CLOUDFLARE_SEARCH_URL: "https://search.example.test" },
+    );
+
+    expect(res.status).toBe(200);
+    const payload = (await res.json()) as {
+      output?: Array<{ type?: string; name?: string }>;
+    };
+    expect(
+      payload.output?.some((item) => item.type === "web_search_call"),
+    ).toBe(false);
+    expect(payload.output?.some((item) => item.type === "function_call")).toBe(
+      true,
+    );
+  });
+
   it("returns a caller's custom search function without starting hosted search", async () => {
     const requests: string[] = [];
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
