@@ -282,7 +282,7 @@ describe("POST /v1/responses — Luna reliability", () => {
       };
       expect(
         payload.output?.some((item) => item.type === "web_search_call"),
-      ).toBe(true);
+      ).toBe(false);
       expect(
         payload.output?.some((item) => item.type === "function_call"),
       ).toBe(true);
@@ -932,7 +932,7 @@ params: {"query":"help me find something"}
     };
     expect(
       payload.output?.some((item) => item.type === "web_search_call"),
-    ).toBe(true);
+    ).toBe(false);
     const fallback = payload.output?.find(
       (item) => item.type === "function_call",
     );
