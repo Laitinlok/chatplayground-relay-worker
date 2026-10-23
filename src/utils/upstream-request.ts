@@ -310,7 +310,18 @@ function boundTranscript(
       }
     }
   }
-  return kept.reverse();
+  const ordered = kept.reverse();
+  if (
+    ordered.length > 0 &&
+    ordered[0]?.type === "text" &&
+    ordered[0].text.length < MAX_UPSTREAM_MESSAGE_CHARS
+  ) {
+    ordered[0] = {
+      type: "text",
+      text: `…(earlier context omitted)\\n${ordered[0].text}`,
+    };
+  }
+  return ordered;
 }
 
 export function endpointUrl(
