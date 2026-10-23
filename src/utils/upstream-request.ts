@@ -1,7 +1,12 @@
 import type { UpstreamEndpoint } from "../constants/endpoints";
 import type { ModelEntry } from "../constants/models";
 import type { ChatCompletionRequest } from "../types/openai";
-import type { UpstreamChatRequest, UpstreamMessage } from "../types/upstream";
+import type {
+  UpstreamChatRequest,
+  UpstreamContentPart,
+  UpstreamContentPartText,
+  UpstreamMessage,
+} from "../types/upstream";
 import { compactSearchToolResult } from "./search-tool-context";
 
 const MAX_UPSTREAM_MESSAGE_CHARS = 15_000;
@@ -90,9 +95,7 @@ export function buildUpstreamRequest(
               : "";
     }
 
-    return typeof content === "string"
-      ? splitUpstreamMessage(role, content)
-      : [{ role, content }];
+    return [{ role, content }];
   });
 
   // chatplayground has no assistant prefill and no reasoning tags. A trailing
@@ -174,13 +177,19 @@ export function buildUpstreamRequest(
     messages.push({ role: "user", content: "Hello." });
   }
 
+  // chatplayground accepts only one new prompt and relies on chatId for
+  // server-side history. This relay stays stateless by folding the OpenAI
+  // transcript into one role-labelled user message after local tool and draft
+  // handling have preserved their context.
+  const upstreamMessages = collapseHistory(messages);
+
   // OpenAI `metadata.save` extension → !noSave. Default: don't pollute the
   // caller's chatplayground history with API traffic (noSave=true).
   const save = req.metadata?.save ?? false;
 
   // Fields shared by all three endpoints.
   const base = {
-    messages,
+    messages: upstreamMessages,
     // Prompt-only agents resume context by chatId; only their messages array
     // is restricted to the current user prompt.
     chatId: req.user ?? "", // OpenAI `user` → chatplayground `chatId`
