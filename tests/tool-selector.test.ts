@@ -17,7 +17,7 @@ function tool(name: string, properties: Record<string, unknown>): OpenAITool {
 describe("web tool classification", () => {
   it.each([
     ["web-browsing", "query"],
-    ["search_news", "search_query"],
+    ["search_web_news", "search_query"],
     ["BROWSING_internet", "query"],
     ["WEB_LOOKUP", "query"],
   ])("recognizes %s with %s", (name, parameter) => {
@@ -29,7 +29,7 @@ describe("web tool classification", () => {
   it.each([
     ["database", { query: { type: "string" } }],
     ["web_lookup", { url: { type: "string" } }],
-    ["search_news", {}],
+    ["search_web_news", {}],
     ["browser", { query: { type: "string" } }],
   ])(
     "does not classify %s without both name and parameter matches",
