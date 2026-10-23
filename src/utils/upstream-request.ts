@@ -243,7 +243,7 @@ function collapseHistory(messages: UpstreamMessage[]): UpstreamMessage[] {
   if (messages.length === 1) {
     const only = messages[0];
     if (!only) return [{ role: "user", content: "" }];
-    return [{ role: "user", content: boundTranscript(only.content) }];
+    return [{ role: "user", content: singleMessageContent(only) }];
   }
 
   const parts: UpstreamContentPart[] = [];
@@ -272,6 +272,20 @@ function collapseHistory(messages: UpstreamMessage[]): UpstreamMessage[] {
       ? textParts.map((part) => part.text).join("")
       : parts;
   return [{ role: "user", content: boundTranscript(transcript) }];
+}
+
+/** Preserve a lone message's original payload without adding a transcript label. */
+function singleMessageContent(message: UpstreamMessage): UpstreamMessage["content"] {
+  if (typeof message.content === "string") {
+    return boundTranscript(message.content) as string;
+  }
+  const images = message.content.filter((part) => part.type === "image_url");
+  const text = message.content.filter(
+    (part): part is UpstreamContentPartText => part.type === "text",
+  );
+  const bounded = boundTranscript(text);
+  const boundedText = typeof bounded === "string" ? [{ type: "text" as const, text: bounded }] : bounded;
+  return [...boundedText, ...images];
 }
 
 /** Keep the newest context within the upstream per-message size limit. */
