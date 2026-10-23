@@ -45,10 +45,8 @@ export function buildUpstreamRequest(
   model: ModelEntry,
   options: { promptOnly?: boolean } = {},
 ): BuiltUpstreamRequest {
-  // chatplayground accepts the same content shape as OpenAI (string or
-  // ContentPart[]), so we pass `content` through unchanged. The only
-  // role normalization: collapse "tool" → "user" (no endpoint has a tool role).
-  //
+  // Preserve multimodal parts when possible and normalize roles unsupported by
+  // chatplayground before folding the transcript into a single user message.
   // chatplayground also has no concept of `tool_calls`: an assistant
   // message that only carries tool_calls has `content: null`, which the
   // upstream Azure/perplexity/lmsys endpoints reject outright ("400 Invalid
@@ -287,7 +285,7 @@ function boundTranscript(
     let start = content.length - MAX_UPSTREAM_MESSAGE_CHARS;
     const firstCode = content.charCodeAt(start);
     if (firstCode >= 0xdc00 && firstCode <= 0xdfff) start++;
-    return content.slice(start);
+    return `…(earlier context omitted)\n${content.slice(start + 1)}`;
   }
 
   let remaining = MAX_UPSTREAM_MESSAGE_CHARS;
