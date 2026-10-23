@@ -279,13 +279,7 @@ function singleMessageContent(message: UpstreamMessage): UpstreamMessage["conten
   if (typeof message.content === "string") {
     return boundTranscript(message.content) as string;
   }
-  const images = message.content.filter((part) => part.type === "image_url");
-  const text = message.content.filter(
-    (part): part is UpstreamContentPartText => part.type === "text",
-  );
-  const bounded = boundTranscript(text);
-  const boundedText = typeof bounded === "string" ? [{ type: "text" as const, text: bounded }] : bounded;
-  return [...boundedText, ...images];
+  return boundTranscript(message.content);
 }
 
 /** Keep the newest context within the upstream per-message size limit. */
