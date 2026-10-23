@@ -8,10 +8,18 @@ import {
 } from "../src/utils/tool-selector";
 import type { OpenAITool } from "../src/utils/tool-shim";
 
-function tool(name: string, properties: Record<string, unknown>): OpenAITool {
+function tool(
+  name: string,
+  properties: Record<string, unknown>,
+  description?: string,
+): OpenAITool {
   return {
     type: "function",
-    function: { name, parameters: { type: "object", properties } },
+    function: {
+      name,
+      description,
+      parameters: { type: "object", properties },
+    },
   };
 }
 
