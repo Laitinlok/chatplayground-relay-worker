@@ -10,6 +10,7 @@ import type {
 import { compactSearchToolResult } from "./search-tool-context";
 
 const MAX_UPSTREAM_MESSAGE_CHARS = 15_000;
+const OMITTED_CONTEXT = "…(earlier context omitted)\\n";
 
 function flattenContent(content: unknown): string {
   if (typeof content === "string") return content;
@@ -282,13 +283,13 @@ function boundTranscript(
 ): string | UpstreamContentPart[] {
   if (typeof content === "string") {
     if (content.length <= MAX_UPSTREAM_MESSAGE_CHARS) return content;
-    let start = content.length - MAX_UPSTREAM_MESSAGE_CHARS;
+    let start = content.length - (MAX_UPSTREAM_MESSAGE_CHARS - OMITTED_CONTEXT.length);
     const firstCode = content.charCodeAt(start);
     if (firstCode >= 0xdc00 && firstCode <= 0xdfff) start++;
-    return `…(earlier context omitted)\n${content.slice(start + 1)}`;
+    return `${OMITTED_CONTEXT}${content.slice(start)}`;
   }
 
-  let remaining = MAX_UPSTREAM_MESSAGE_CHARS;
+  let remaining = MAX_UPSTREAM_MESSAGE_CHARS - OMITTED_CONTEXT.length;
   const kept: UpstreamContentPart[] = [];
   for (let i = content.length - 1; i >= 0 && remaining > 0; i--) {
     const part = content[i];
@@ -318,7 +319,7 @@ function boundTranscript(
   ) {
     ordered[0] = {
       type: "text",
-      text: `…(earlier context omitted)\\n${ordered[0].text}`,
+      text: `${OMITTED_CONTEXT}${ordered[0].text}`,
     };
   }
   return ordered;
