@@ -355,10 +355,14 @@ export function streamUpstreamAsOpenAI(
         controller.enqueue(encoder.encode("data: [DONE]\n\n"));
         controller.close();
       } catch (err) {
-        controller.error(err);
-      }
-    },
-  });
+ if (!cancelled) controller.error(err);
+ }
+ },
+ async cancel(reason) {
+ cancelled = true;
+ await reader?.cancel(reason);
+ },
+ });
 }
 
 interface ToolAwareChunkMeta {
