@@ -780,7 +780,7 @@ describe("POST /v1/chat/completions — chatId cache", () => {
   it("uses cached chatIds only within the same deployment and hour", async () => {
     const cache = chatCache();
     const now = 1_800_000_000_000;
-    vi.spyOn(Date, "now").mockReturnValue(now);
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(now);
     upstream(() => new Response(`ok${CHAT_ID}`));
     const testEnv = {
       ...env,
@@ -806,7 +806,7 @@ describe("POST /v1/chat/completions — chatId cache", () => {
     expect(JSON.parse(String(chatCall()[1].body)).chatId).toBe("");
 
     testEnv.CF_VERSION_METADATA = { id: "version-a" };
-    vi.spyOn(Date, "now").mockReturnValue(now + 60 * 60 * 1000);
+    nowSpy.mockReturnValue(now + 60 * 60 * 1000);
     await post(hello, testEnv, requestHeaders);
     expect(JSON.parse(String(chatCall()[1].body)).chatId).toBe("");
   });
