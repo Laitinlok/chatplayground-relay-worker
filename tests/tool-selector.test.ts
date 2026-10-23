@@ -30,7 +30,7 @@ describe("embedding-assisted tool ranking", () => {
     });
     const unrelated = tool("search_memories", {
       query: { type: "string" },
-    });
+    }, "Search personal conversation memories.");
     const ai = {
       run: async (_model: string, input: { text: string[] }) => {
         expect(input.text).toHaveLength(3);
