@@ -47,7 +47,7 @@ import { resolveReasoningEffort } from "../utils/reasoning-prefill";
 
 const chat = new Hono<{ Bindings: Env; Variables: Variables }>();
 
-const CHAT_CACHE_TTL_SECONDS = 60 * 60 * 24 * 7; // 7 days
+const CHAT_CACHE_TTL_SECONDS = 60 * 60; // 1 hour
 
 function latestUserText(messages: OpenAIMessage[]): string {
   const latestUser = [...messages]
@@ -105,7 +105,8 @@ async function chatCacheKey(
   const sessionHash = Array.from(new Uint8Array(digest), (byte) =>
     byte.toString(16).padStart(2, "0"),
   ).join("");
-  return `chat:${conversationId ?? `${sessionHash}:${modelId}`}`;
+  const versionId = envVersionIdPlaceholder;
+ return `chat:${versionId}:${conversationId ?? `${sessionHash}:${modelId}`}`;
 }
 
 async function loadCachedChatId(env: Env, key: string): Promise<string | null> {
