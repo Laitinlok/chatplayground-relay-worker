@@ -216,7 +216,7 @@ describe("streamUpstreamAsOpenAI trailer compatibility", () => {
   }
 
   it("removes a leading sentinel and streams the answer", async () => {
-    expect(await streamedContent([` CHAT_ID:${CUID}\\nHi back!`])).toBe(
+    expect(await streamedContent([` CHAT_ID:${CUID}\nHi back!`])).toBe(
       "Hi back!",
     );
   });
