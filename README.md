@@ -477,7 +477,7 @@ The 500 ms client-search fallback is used only when a Responses request declares
 
 | Binding | Purpose |
 |---|---|
-| `MODEL_CACHE` | Cross-isolate model registry cache (1 h TTL) |
+| `MODEL_CACHE` | Cross-isolate model registry cache (1 h TTL), and the rotated Clerk `__client` cookie in gateway mode |
 
 ## Caveats
 
