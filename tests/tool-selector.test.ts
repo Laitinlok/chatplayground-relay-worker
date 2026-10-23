@@ -26,7 +26,7 @@ describe("embedding-assisted tool ranking", () => {
     const ai = {
       run: async (_model: string, input: { text: string[] }) => {
         expect(input.text).toHaveLength(3);
-        return { data: [[1, 0], [0.98, 0.1], [0.1, 0.99]] };
+        return { data: [[1, 0], [0.1, 0.99], [0.98, 0.1]] };
       },
     };
 
@@ -36,8 +36,8 @@ describe("embedding-assisted tool ranking", () => {
       ai,
     );
     expect(ranked?.tools.map((item) => item.function.name)).toEqual([
-      "search_memories",
       "create_calendar_event",
+      "search_memories",
     ]);
     expect(ranked?.confident).toBe(true);
   });
