@@ -12,10 +12,11 @@ import {
   type CitationTitleMap,
 } from "./citation-titles";
 
-// chatplayground appends `CHAT_ID:<cuid>` at the very end of the stream as a
-// sentinel. CUID format: `c` + ≥20 chars of [a-z0-9]. We strip it before
-// emitting content.
-const SENTINEL_RE = /CHAT_ID:(c[a-z0-9]{20,})$/;
+// chatplayground marks responses with a `CHAT_ID:<cuid>` sentinel. It may
+// appear at the beginning, middle, or end of a response. CUID format: `c` +
+// ≥20 chars of [a-z0-9]. A non-CUID boundary prevents matching a partial id.
+const SENTINEL_RE = /CHAT_ID:(c[a-z0-9]{20,})(?![a-z0-9])/;
+const LEADING_SENTINEL_RE = /^\s*CHAT_ID:(c[a-z0-9]{20,})(?![a-z0-9])\s*/;
 
 // perplexity emits its citation list as a trailing chunk of the form
 // `CITATIONS:["url1","url2",...]`. The web client parses it as structured
@@ -56,7 +57,9 @@ export async function collectUpstream(
  * CHAT_ID-then-CITATIONS) is handled.
  */
 export function parseTrailers(buf: string): ParsedUpstream {
-  let working = buf;
+  const leadingSentinel = LEADING_SENTINEL_RE.exec(buf);
+  let working = leadingSentinel ? buf.slice(leadingSentinel[0].length) : buf;
+  let chatId: string | null = leadingSentinel?.[1] ?? null;
   let citations: readonly string[] = [];
 
   const cm = CITATIONS_RE.exec(working);
@@ -70,10 +73,10 @@ export function parseTrailers(buf: string): ParsedUpstream {
   }
 
   const sm = SENTINEL_RE.exec(working);
-  let chatId: string | null = null;
   if (sm) {
-    chatId = sm[1] ?? null;
-    working = working.slice(0, sm.index);
+    chatId ??= sm[1] ?? null;
+    working =
+      working.slice(0, sm.index) + working.slice(sm.index + sm[0].length);
   }
 
   return { content: working, chatId, citations };
