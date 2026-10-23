@@ -245,6 +245,8 @@ export function streamUpstreamAsOpenAI(
 ): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();
   const decoder = new TextDecoder();
+ let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+ let cancelled = false;
 
   function sse(
     delta: ChatCompletionChunkDelta,
@@ -302,7 +304,7 @@ export function streamUpstreamAsOpenAI(
 
   return new ReadableStream({
     async start(controller) {
-      const reader = body.getReader();
+      reader = body.getReader();
       let pending = "";
 
       controller.enqueue(sse({ role: "assistant" }));
