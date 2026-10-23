@@ -16,7 +16,8 @@ export type OpenAIContentPart = OpenAIContentPartText | OpenAIContentPartImage;
 export type OpenAIMessageContent = string | null | OpenAIContentPart[];
 
 export interface OpenAIMessage {
-  role: "system" | "user" | "assistant" | "tool";
+  // `developer` is the newer SDK name for `system`.
+ role: "system" | "developer" | "user" | "assistant" | "tool";
   content: OpenAIMessageContent;
   name?: string;
   tool_call_id?: string;
