@@ -58,7 +58,17 @@ describe("getModels — the three layers", () => {
     expect(MODEL_CACHE.get).toHaveBeenCalledTimes(1);
   });
 
-  it("writes a freshly discovered registry back to KV with a TTL", async () => {
+  it("returns discovered models even when the KV write fails", async () => {
+ const MODEL_CACHE = kv();
+ MODEL_CACHE.put.mockRejectedValue(new Error("KV unavailable"));
+ vi.spyOn(console, "error").mockImplementation(() => {});
+ vi.spyOn(globalThis, "fetch").mockResolvedValue(Response.json([entry()]));
+
+ const result = await getModels({ ...env, MODEL_CACHE });
+ expect(result[0]?.id).toBe("gpt-5.6-luna");
+ });
+
+ it("writes a freshly discovered registry back to KV with a TTL", async () => {
     const MODEL_CACHE = kv();
     vi.spyOn(globalThis, "fetch").mockResolvedValue(Response.json([entry()]));
 
