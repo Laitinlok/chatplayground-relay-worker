@@ -863,10 +863,7 @@ responses.post("/v1/responses", async (c) => {
     clientSearchTools.length === 1 && typeof raw.tool_choice !== "object";
   const canPreflightSearch =
     !hasToolResult &&
-    // 500 ms client fallback only when exactly one caller search function is
-    // available. Parallel requests stay on the model-directed hosted path.
     canClientFallback &&
-    !/\b(?:and|both|each)\b/i.test(latestUserText) &&
     initialHostedSearchTools.length === 1 &&
     (raw.tool_choice === undefined ||
       raw.tool_choice === "auto" ||
@@ -969,6 +966,13 @@ responses.post("/v1/responses", async (c) => {
       }
       searches.push({ query, results });
       for (const result of results) fetchedPages.set(result.url, result);
+      return hostedSearchResponse(
+        model.id,
+        request.messages,
+        searches,
+        [],
+        raw.stream,
+      );
       request.messages.push({
         role: "assistant",
         content: null,
@@ -1286,7 +1290,13 @@ responses.post("/v1/responses", async (c) => {
       });
     }
     if (searches.length > 0) {
-      request.messages.push({ role: "user", content: SEARCH_SYNTHESIS_PROMPT });
+      return hostedSearchResponse(
+        model.id,
+        request.messages,
+        searches,
+        fallbackToolCalls,
+        raw.stream,
+      );
     }
     if (fallbackToolCalls.length > 0) {
       toolCall = fallbackToolCalls[0] ?? null;
