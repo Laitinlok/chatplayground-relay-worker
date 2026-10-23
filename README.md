@@ -482,9 +482,13 @@ The 500 ms client-search fallback is used only when a Responses request declares
 ## Caveats
 
 1. **Tool calling uses a relay compatibility shim.** The upstream chat endpoints (`azure` / `perplexity` / `lmsys`) do not natively accept OpenAI `tools` or `tool_choice`. When tools are requested, the relay prompts the model to emit a supported tool-call format, parses it, and executes hosted web-search calls in the relay. This is a compatibility layer rather than native upstream tool calling; behavior can vary across models.
-2. **No real usage counts.** chatplayground doesn't return token usage, so
+2. **History is folded into one message.** Upstream rejects more than one
+   message per request, so a multi-turn `messages[]` reaches the model as a
+   single role-labelled transcript — see [Continuing a chatplayground-side
+   conversation](#continuing-a-chatplayground-side-conversation).
+3. **No real usage counts.** chatplayground doesn't return token usage, so
    the `usage` field is estimated (chars ÷ 4). Don't bill on it.
-3. **Premium models 403 on a non-premium account.** The feed marks 12 of its
+4. **Premium models 403 on a non-premium account.** The feed marks 12 of its
    33 chat models `premiumOnly`; upstream rejects those unless the account has
    premium. They're hidden from `GET /v1/models` by default but stay callable,
    so a hardcoded id returns HTTP 403 `upstream_403` and upstream's own wording:
@@ -501,24 +505,25 @@ The 500 ms client-search fallback is used only when a Responses request declares
    exceptions. `creditWeight` is not the gate either (weight 7 succeeded while
    weight 2 was rejected). Re-derive none of this from the flag names; the
    feed's `active` flag, for instance, is enforced nowhere.
-4. **Upstream rate-limits bursts.** A run of back-to-back chat calls starts
+5. **Upstream rate-limits bursts.** A run of back-to-back chat calls starts
    returning `429 You're sending prompts too quickly`, with no `Retry-After`
    header to pace against. The relay passes 429 through unchanged so the
    client's own rate-limit backoff handles it.
-5. **`lifetimeOnly` is an unresolved flag.** Three models carry it
+6. **`lifetimeOnly` is an unresolved flag.** Three models carry it
    (`claude-sonnet-4-6`, `gemini-3.5-flash-lite`, `kimi-k2.6`). Only one was
    ever tested, on one paid account, and it worked — which cannot distinguish
    a real entitlement gate from a UI badge, the way `active` is one. It is
    also not established that the flag refers to the same product as any given
    "lifetime" plan. The relay does not read it: all three are
    `premiumOnly:false`, so they are listed regardless of what it means.
-6. **Brittle to upstream changes.** Any change to `/api/models` shape, endpoint
+7. **Brittle to upstream changes.** Any change to `/api/models` shape, endpoint
    path, or request shape may break the worker. Open an issue / PR.
-7. **`/v1/files` is essentially anonymous.** chatplayground's upload
+8. **`/v1/files` is essentially anonymous** in passthrough mode (gateway mode
+   puts it behind the relay key like everything else). chatplayground's upload
    endpoint accepts any caller (no auth), and our Bearer regex is a speed
    bump, not a gate. If you deploy publicly and care about your worker's
    request quota, add a size cap or remove the route.
-8. **Keep your session token and `__client` cookie private.** They grant access to your
+9. **Keep your session token and `__client` cookie private.** They grant access to your
    chatplayground account quota; treat it like an API key.
 
 ## License
