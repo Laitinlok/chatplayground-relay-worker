@@ -16,7 +16,6 @@ import {
 // appear at the beginning, middle, or end of a response. CUID format: `c` +
 // ≥20 chars of [a-z0-9]. A non-CUID boundary prevents matching a partial id.
 const SENTINEL_RE = /CHAT_ID:(c[a-z0-9]{20,})(?![a-z0-9])/;
-const LEADING_SENTINEL_RE = /^\\s*CHAT_ID:(c[a-z0-9]{20,})(?![a-z0-9])\\s*/;
 const LEADING_SENTINEL_RE = /^\s*CHAT_ID:(c[a-z0-9]{20,})(?![a-z0-9])\s*/;
 
 // perplexity emits its citation list as a trailing chunk of the form
