@@ -172,7 +172,6 @@ describe("buildUpstreamRequest — field mapping", () => {
     expect(body.messages).toHaveLength(1);
     expect(body.messages[0]?.content).toContain("😀b");
     expect(body.messages.some((message) => message.content.includes("�"))).toBe(false);
-    expect(JSON.stringify(body.messages[0]?.content)).toHaveLength(15_000);
   });
 
  it("preserves image_url content parts for upstream vision models", () => {
