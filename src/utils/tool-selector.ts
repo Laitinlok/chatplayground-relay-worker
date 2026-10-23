@@ -17,6 +17,7 @@ const TOOL_MATCH_THRESHOLD = 0.35;
 const TOOL_MATCH_MARGIN = 0.025;
 const MAX_TOOL_EMBEDDING_TEXT = 2_000;
 const MAX_EMBEDDING_TOOLS = 32;
+const MAX_EMBEDDING_INPUTS = 30;
 
 type EmbeddingAI = {
   run: (
