@@ -54,7 +54,12 @@ export function buildUpstreamRequest(
     ? [latestUserMessage(req.messages) ?? { role: "user" as const, content: "" }]
     : req.messages;
   const messages: UpstreamMessage[] = sourceMessages.flatMap((msg) => {
-    const role = msg.role === "tool" ? "user" : msg.role;
+    const role =
+ msg.role === "tool"
+ ? "user"
+ : msg.role === "developer"
+ ? "system"
+ : msg.role;
 
     let content: UpstreamMessage["content"];
     if (msg.role === "assistant" && msg.tool_calls?.length) {
