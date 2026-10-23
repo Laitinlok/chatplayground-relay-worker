@@ -29,7 +29,12 @@ function parameterNames(tool: OpenAITool): string[] {
 }
 
 function toolNameSuggestsSearch(name: string): boolean {
-  return /(?:web|search|browsing|duckduckgo|\bddg\b)/i.test(name);
+  const normalized = name.toLowerCase().replace(/[^a-z0-9]+/g, "_");
+  if (/(?:conversation|rag|memory|knowledge|document|vector|semantic)/i.test(normalized))
+    return false;
+  return /(?:^|_)(?:web_search|search_web|web_browsing|browsing|duckduckgo|ddg)(?:_|$)/i.test(
+    normalized,
+  );
 }
 
 function toolNameSuggestsFetch(name: string): boolean {
@@ -45,9 +50,14 @@ export function isFetchTool(tool: OpenAITool): boolean {
 
 export function isSearchTool(tool: OpenAITool): boolean {
   const parameters = parameterNames(tool);
+  const hasSearchQuery =
+    parameters.includes("query") || parameters.includes("search_query");
+  const hasWebSearchDefinition = /\b(?:web search|search the web|search the internet|internet search|browser search|duckduckgo)\b/i.test(
+    tool.function.description ?? "",
+  );
   return (
-    toolNameSuggestsSearch(tool.function.name) &&
-    (parameters.includes("query") || parameters.includes("search_query"))
+    hasSearchQuery &&
+    (toolNameSuggestsSearch(tool.function.name) || hasWebSearchDefinition)
   );
 }
 
