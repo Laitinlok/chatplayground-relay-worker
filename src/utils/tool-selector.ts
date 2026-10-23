@@ -12,6 +12,92 @@ import { gateToolCalls, type OpenAITool } from "./tool-shim";
 import { needsCurrentWebSearch } from "./search-query";
 
 const SELECTOR_TIMEOUT_MS = 10_000;
+const EMBEDDING_MODEL = "@cf/baai/bge-small-en-v1.5";
+const TOOL_MATCH_THRESHOLD = 0.35;
+const MAX_TOOL_EMBEDDING_TEXT = 2_000;
+
+type EmbeddingAI = {
+ run: (
+ model: string,
+ input: { text: string[] },
+ ) => Promise<{ data?: number[][] }>;
+};
+
+export interface RankedToolCandidates {
+ tools: OpenAITool[];
+ topScore: number;
+ margin: number;
+ confident: boolean;
+}
+
+function cosineSimilarity(a: number[], b: number[]): number {
+ if (a.length === 0 || a.length !== b.length) return -1;
+ let dot = 0;
+ let normA = 0;
+ let normB = 0;
+ for (let index = 0; index < a.length; index++) {
+ dot += a[index]! * b[index]!;
+ normA += a[index]! * a[index]!;
+ normB += b[index]! * b[index]!;
+ }
+ if (normA === 0 || normB === 0) return -1;
+ return dot / Math.sqrt(normA * normB);
+}
+
+/** Rank advertised tools semantically; callers must still validate the chosen call. */
+export async function rankToolsByEmbedding(
+ userText: string,
+ tools: OpenAITool[],
+ ai?: EmbeddingAI,
+): Promise<RankedToolCandidates | null> {
+ if (!ai || !userText.trim() || tools.length === 0) return null;
+ const descriptions = tools.map((tool) =>
+ [
+ `Tool: ${tool.function.name}`,
+ tool.function.description ?? "",
+ `Parameters: ${JSON.stringify(tool.function.parameters ?? {})}`,
+ ]
+ .join("\\n")
+ .slice(0, MAX_TOOL_EMBEDDING_TEXT),
+ );
+ try {
+ const response = await ai.run(EMBEDDING_MODEL, {
+ text: [userText.slice(0, MAX_TOOL_EMBEDDING_TEXT), ...descriptions],
+ });
+ const vectors = response?.data;
+ if (
+ !Array.isArray(vectors) ||
+ vectors.length !== tools.length + 1 ||
+ !vectors.every(
+ (vector) =>
+ Array.isArray(vector) &&
+ vector.length > 0 &&
+ vector.every((value) => Number.isFinite(value)),
+ )
+ )
+ return null;
+ const ranked = tools
+ .map((tool, index) => ({
+ tool,
+ score: cosineSimilarity(vectors[0]!, vectors[index + 1]!),
+ index,
+ }))
+ .filter((item) => Number.isFinite(item.score) && item.score >= 0)
+ .sort((a, b) => b.score - a.score || a.index - b.index);
+ if (ranked.length === 0) return null;
+ const topScore = ranked[0]!.score;
+ const margin = topScore - (ranked[1]?.score ?? 0);
+ return {
+ tools: ranked.map((item) => item.tool),
+ topScore,
+ margin,
+ confident: topScore >= TOOL_MATCH_THRESHOLD && margin >= 0.025,
+ };
+ } catch {
+ // Embeddings are an optional ranking signal; unavailable AI must not break routing.
+ return null;
+ }
+}
 function parameterNames(tool: OpenAITool): string[] {
   const parameters = tool.function.parameters;
   if (
