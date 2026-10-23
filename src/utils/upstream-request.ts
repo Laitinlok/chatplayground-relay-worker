@@ -320,7 +320,7 @@ function boundTranscript(
   if (
     ordered.length > 0 &&
     ordered[0]?.type === "text" &&
-    ordered[0].text.length < MAX_UPSTREAM_MESSAGE_CHARS
+    ordered[0].text.length <= MAX_UPSTREAM_MESSAGE_CHARS - OMITTED_CONTEXT.length
   ) {
     ordered[0] = {
       type: "text",
