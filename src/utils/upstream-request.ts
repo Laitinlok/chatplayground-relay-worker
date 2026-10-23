@@ -255,12 +255,10 @@ function collapseHistory(messages: UpstreamMessage[]): UpstreamMessage[] {
       message.content.startsWith("<TOOL_RESULT>")
         ? "Tool"
         : ROLE_LABEL[message.role];
-    parts.push({
-      type: "text",
-      text: `${label}:${typeof message.content === "string" ? ` ${message.content}` : ""}`,
-    });
-    if (typeof message.content !== "string") {
-      parts.push(...message.content);
+    if (typeof message.content === "string") {
+      parts.push({ type: "text", text: `${label}: ${message.content}` });
+    } else {
+      parts.push({ type: "text", text: `${label}:` }, ...message.content);
     }
   }
 
