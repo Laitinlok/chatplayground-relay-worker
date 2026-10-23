@@ -384,7 +384,7 @@ Cloudflare Worker (Hono)
                 │  Authorization: Bearer <session jwt>
                 ▼
        chatplayground upstream
-                │  text/plain stream + trailing "CHAT_ID:<cuid>" sentinel
+                │  text/plain stream + "CHAT_ID:<cuid>" sentinel (leading in newer responses; trailing in older ones)
                 ▼
        streamUpstreamAsOpenAI → OpenAI chat.completion.chunk SSE
 ```
