@@ -75,11 +75,12 @@ describe("tryParseRelayToolCall", () => {
  },
  },
  ];
+ const genericSearchCall = `<TOOL_CALL>
+tool: web_search
+params: {"query":"latest news"}
+</TOOL_CALL>`;
  expect(
- gateToolCalls(
- '<TOOL_CALL>\\ntool: web_search\\nparams: {"query":"latest news"}\\n</TOOL_CALL>',
- searchNews,
- ).calls[0]?.function.name,
+ gateToolCalls(genericSearchCall, searchNews).calls[0]?.function.name,
  ).toBe("search_news");
  const conversationSearch: OpenAITool[] = [
  {
@@ -93,12 +94,9 @@ describe("tryParseRelayToolCall", () => {
  },
  },
  ];
- expect(
- gateToolCalls(
- '<TOOL_CALL>\\ntool: web_search\\nparams: {"query":"latest news"}\\n</TOOL_CALL>',
- conversationSearch,
- ).calls,
- ).toEqual([]);
+ expect(gateToolCalls(genericSearchCall, conversationSearch).calls).toEqual(
+ [],
+ );
  });
 
  it("rejects a generic search call when multiple advertised search tools are ambiguous", () => {
