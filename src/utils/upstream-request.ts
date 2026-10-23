@@ -237,7 +237,13 @@ function splitUpstreamMessage(
  let end = Math.min(offset + MAX_UPSTREAM_MESSAGE_CHARS, content.length);
  // Keep UTF-16 surrogate pairs intact at chunk boundaries.
  const lastCode = content.charCodeAt(end - 1);
- if (lastCode >= 0xd800 && lastCode <= 0xdbff) end--;
+ const nextCode = content.charCodeAt(end);
+ if (
+ lastCode >= 0xd800 &&
+ lastCode <= 0xdbff &&
+ nextCode >= 0xdc00 &&
+ nextCode <= 0xdfff
+ ) end--;
  chunks.push({ role, content: content.slice(offset, end) });
  offset = end;
  }
