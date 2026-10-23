@@ -429,6 +429,7 @@ carry the same flags today.
 src/
 ├── index.ts                  Hono app + CORS + auth + route mounting
 ├── constants/
+│ ├── endpoints.ts azure / perplexity / lmsys, unknown → lmsys
 │   ├── models.ts             ModelEntry shape (no hardcoded list)
 │   └── timeouts.ts           CHAT / UPLOAD / DISCOVERY fetch timeouts
 ├── middleware/
