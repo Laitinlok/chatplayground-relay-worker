@@ -238,7 +238,7 @@ curl -s https://chatplayground-relay.<acct>.workers.dev/v1/models \
 
 A number is a working deploy. `503 model_discovery_failed` means the worker is
 up but couldn't reach the upstream feed. `401` means the Bearer token isn't a
-well-formed JWT.
+well-formed JWT — or, in gateway mode, isn't the relay key.
 
 Two optional follow-ups, in the order they usually matter:
 
@@ -260,8 +260,12 @@ gateway mode and anything shared should add KV:
 
 ```bash
 npx wrangler kv namespace create MODEL_CACHE
-# Then uncomment the kv_namespaces block in wrangler.jsonc and paste the printed ID.
+# Then replace the `id` in wrangler.jsonc's kv_namespaces block with the printed one.
 ```
+
+The `id` checked in to `wrangler.jsonc` belongs to the author's account, so a
+fresh clone must either replace it as above or delete the `kv_namespaces`
+block to run without KV — deploying it unchanged fails.
 
 ## Usage
 
@@ -278,7 +282,7 @@ curl -s $WORKER/v1/models -H "Authorization: Bearer $KEY" | jq
 curl -s $WORKER/v1/chat/completions \
      -H "Authorization: Bearer $KEY" \
      -H "Content-Type: application/json" \
-     -d '{"model":"gpt-5.6-luna","messages":[{"role":"user","content":"say hi"}]}' | jq
+     -d '{"model":"gpt-6-luna","messages":[{"role":"user","content":"say hi"}]}' | jq
 
 # Streaming
 curl -N $WORKER/v1/chat/completions \
@@ -299,14 +303,14 @@ client = OpenAI(
 
 # Text
 resp = client.chat.completions.create(
-    model="gpt-5.6-luna",
+    model="gpt-6-luna",
     messages=[{"role": "user", "content": "What is use-after-free?"}],
 )
 print(resp.choices[0].message.content)
 
 # Streaming
 for chunk in client.chat.completions.create(
-    model="gpt-5.6-luna",
+    model="gpt-6-luna",
     messages=[{"role": "user", "content": "Count to 5"}],
     stream=True,
 ):
