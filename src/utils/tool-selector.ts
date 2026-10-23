@@ -14,7 +14,9 @@ import { needsCurrentWebSearch } from "./search-query";
 const SELECTOR_TIMEOUT_MS = 10_000;
 const EMBEDDING_MODEL = "@cf/baai/bge-small-en-v1.5";
 const TOOL_MATCH_THRESHOLD = 0.35;
+const TOOL_MATCH_MARGIN = 0.025;
 const MAX_TOOL_EMBEDDING_TEXT = 2_000;
+const MAX_EMBEDDING_TOOLS = 32;
 
 type EmbeddingAI = {
  run: (
