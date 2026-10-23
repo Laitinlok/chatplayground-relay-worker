@@ -301,7 +301,7 @@ export async function selectToolForAutoChoice(
               description: tool.function.description,
               parameters: tool.function.parameters,
             })),
-          )}`, 
+          )}`,
         ].join("\n"),
       },
       { role: "user", content: latestUserText(request) },
