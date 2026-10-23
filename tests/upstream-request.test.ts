@@ -270,6 +270,7 @@ describe("buildUpstreamRequest — field mapping", () => {
     const transcript = body.messages
       .map((message) => String(message.content))
       .join("\n");
+    expect(transcript).toContain("System:");
     expect(transcript).toContain(
       "If an edit/write/replace tool is still needed",
     );
