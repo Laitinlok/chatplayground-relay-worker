@@ -788,15 +788,17 @@ describe("POST /v1/chat/completions — chatId cache", () => {
       CF_VERSION_METADATA: { id: "version-a" },
     };
     const requestHeaders = { "x-conversation-id": "conversation-1" };
+    const firstKey = `chat:version-a:${Math.floor(now / (60 * 60 * 1000))}:conversation-1`;
 
     await post(hello, testEnv, requestHeaders);
     expect(cache.put).toHaveBeenLastCalledWith(
-      expect.stringContaining("chat:version-a:"),
+      firstKey,
       "clm1234567890abcdefgh",
       { expirationTtl: 60 * 60 },
     );
 
     await post(hello, testEnv, requestHeaders);
+    expect(cache.get).toHaveBeenLastCalledWith(firstKey);
     expect(JSON.parse(String(chatCall()[1].body)).chatId).toBe(
       "clm1234567890abcdefgh",
     );
