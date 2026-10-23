@@ -286,9 +286,11 @@ export async function selectToolForAutoChoice(
           "Return JSON only.",
           'Return {"action":"call_tool","name":"exact tool name","arguments":{...}} only when a tool is necessary.',
           'Return {"action":"answer"} when no tool is necessary.',
-          "If a search tool and a fetch/scrape tool are available, choose the exact listed search tool first. Never substitute web_search, web_fetch, or another invented name.",
-          `Search tools: ${JSON.stringify(searchTools.map((tool) => tool.function.name))}`,
-          `Fetch tools: ${JSON.stringify(fetchTools.map((tool) => tool.function.name))}`,
+            wantsWebSearch
+            ? "If a search tool and a fetch/scrape tool are available, choose the exact listed search tool first. Never substitute web_search, web_fetch, or another invented name."
+            : "Choose the most relevant listed tool only when it is necessary to fulfill the request. Otherwise return action=answer.",
+          `Search tools: ${JSON.stringify(candidateTools.filter(isSearchTool).map((tool) => tool.function.name))}`,
+          `Fetch tools: ${JSON.stringify(candidateTools.filter(isFetchTool).map((tool) => tool.function.name))}`,
           `Available tools: ${JSON.stringify(candidateTools.map((tool) => ({ name: tool.function.name, description: tool.function.description, parameters: tool.function.parameters })))}`,
         ].join("\n"),
       },
@@ -323,7 +325,7 @@ export async function selectToolForAutoChoice(
       Array.isArray(decision.arguments)
     )
       return null;
-    if (isSelectedFetchTool(decision.name) && !hasSearchResult) {
+    if (wantsWebSearch && isSelectedFetchTool(decision.name) && !hasSearchResult) {
       // Explicit URLs do not bypass search-first; a fetch is valid only after
       // this relay has stored search results.
       return fallbackSearchCall();
