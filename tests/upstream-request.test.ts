@@ -157,9 +157,9 @@ describe("buildUpstreamRequest — field mapping", () => {
  },
  AZURE_MODEL,
  );
- expect(body.messages.slice(0, 2)).toEqual([
+ expect(body.messages).toEqual([
  { role: "system", content: "Follow these rules." },
- { role: "assistant", content: "" },
+ { role: "user", content: "hi" },
  ]);
  });
 
