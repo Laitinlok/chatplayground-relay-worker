@@ -38,6 +38,26 @@ describe("web tool classification", () => {
     },
   );
 
+  it("does not mistake conversation search tools for web search", () => {
+    expect(
+      isSearchTool(tool("agora_search_conversations", { query: { type: "string" } })),
+    ).toBe(false);
+    expect(
+      isSearchTool(tool("search_memories", { search_query: { type: "string" } })),
+    ).toBe(false);
+    expect(
+      isSearchTool(
+        {
+          ...tool("lookup", { query: { type: "string" } }),
+          function: {
+            ...tool("lookup", { query: { type: "string" } }).function,
+            description: "Search the web for current information.",
+          },
+        },
+      ),
+    ).toBe(true);
+  });
+
   it("selects any advertised search tool for latest information", () => {
     const request = {
       model: "gpt-6-luna",
