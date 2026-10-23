@@ -343,8 +343,15 @@ Add a custom OpenAI-compatible provider:
 
 Every API call defaults to a fresh chatplayground chat with `noSave: true` —
 nothing shows up in your chatplayground.ai dashboard, and each request starts
-a new conversation on the upstream side. The conversation still works because
-OpenAI clients re-send the full `messages[]` array every turn.
+a new conversation on the upstream side.
+
+Upstream accepts only one message per request ("Send only the new prompt.
+Conversation history is not accepted."); the web UI sends just the new turn
+and keeps history server-side under the chat id. The relay stays stateless
+instead: OpenAI clients re-send the full `messages[]` every turn, and the relay
+folds them into a single user message as a role-labelled transcript
+(`System:` / `User:` / `Assistant:`, images kept in place). Multi-turn works,
+but the model sees a transcript rather than native turns.
 
 Two opt-in extension fields let you change that:
 
@@ -354,6 +361,9 @@ Two opt-in extension fields let you change that:
 | Continue a specific chatplayground chat | `"user": "<chatId>"` (CUID from a prior chatplayground session) |
 
 Standard OpenAI SDKs don't surface these but you can hand-craft the request.
+When continuing a chat with `user`, send only the new message: upstream already
+holds that chat's history, and a re-sent `messages[]` would be folded in on
+top of it, so the model would see the history twice.
 
 ## Architecture
 
@@ -370,7 +380,7 @@ Cloudflare Worker (Hono)
   └── routes/files             → forward multipart to temp-file-host
                 │
                 │  POST app.chatplayground.ai/api/chat/{azure|perplexity|lmsys}
-                │       (endpoint chosen per model botId)
+                │       (endpoint taken from the model's feed entry)
                 │  Content-Type: text/plain;charset=UTF-8
                 │  Authorization: Bearer <session jwt>
                 ▼
@@ -388,8 +398,8 @@ Cloudflare Worker (Hono)
 2. **KV cache** (1 h TTL) — hits across isolates if `MODEL_CACHE` binding is configured
    (the same namespace also holds the rotated Clerk cookie under `clerk:client_cookie`)
 3. **Live discovery** — `GET app.chatplayground.ai/api/models` (public JSON,
-   no auth), validate each entry (`{botId, modelName, provider, group,
-   endpoint, active, premiumOnly}`), keep `group:"chat"`. The `active` flag is
+   no auth), validate the fields it relies on (`{botId, modelName, provider,
+   group, endpoint}`), keep `group:"chat"`. The `active` flag is
    **not** filtered on — it controls UI visibility only; inactive models are
    still callable upstream. Each entry's `endpoint` field decides which of the
    three `/api/chat/*` upstreams serves it.
@@ -409,8 +419,10 @@ the 403, and a model listing shouldn't spend credits to find out.
 The registry cached at every layer is the **full** list. `premiumOnly` is
 filtered at read time in the `/v1/models` handler, so flipping
 `PREMIUM_MODELS` takes effect immediately rather than waiting out the 1 h KV
-TTL. Note the gate is `premiumOnly`, not the feed's `tier` field:
-`gemini-3.7-flash` is `tier:"basic"` and still 403s without premium.
+TTL. Note the gate is `premiumOnly`, not the feed's `tier` field: when this
+was tested, a `tier:"basic"` + `premiumOnly` model (`gemini-3.7-flash`, since
+dropped from the feed) 403'd without premium. `gemini-3.8-flash` and `glm-5.3`
+carry the same flags today.
 
 ## Project layout
 
