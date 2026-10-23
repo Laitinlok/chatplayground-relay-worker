@@ -158,7 +158,7 @@ describe("buildUpstreamRequest — field mapping", () => {
     expect(body.messages).toEqual([
       {
         role: "user",
-        content: "System: Follow these rules.\n\nAssistant:\n\nUser: hi",
+        content: "System: Follow these rules.\n\nUser: hi",
       },
     ]);
   });
