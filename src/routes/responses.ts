@@ -155,6 +155,41 @@ export function addHostedWebSearches(
   return { ...enriched, output };
 }
 
+function hostedSearchResponse(
+  model: string,
+  messages: ResponsesRequest["messages"] extends never ? never : import("../types/openai").OpenAIMessage[],
+  searches: readonly { query: string; results: WebSearchResult[] }[],
+  fallbackCalls: ReturnType<typeof gateToolCalls>["calls"],
+  stream: boolean | undefined,
+): Response {
+  const base = chatResultToResponses(model, "", null, messages);
+  const withSearch = addHostedWebSearches(base, searches);
+  const output = fallbackCalls.length
+    ? [
+        ...withSearch.output,
+        ...fallbackCalls.flatMap((call) => {
+          const functionCall = chatResultToResponses(
+            model,
+            "",
+            call,
+            messages,
+          ).output.find((item) => item.type === "function_call");
+          return functionCall ? [functionCall] : [];
+        }),
+      ]
+    : withSearch.output.filter((item) => item.type === "web_search_call");
+  const result = { ...withSearch, output, output_text: "" };
+  return stream
+    ? new Response(streamResponse(result, fallbackCalls[0] ?? null), {
+        headers: {
+          "content-type": "text/event-stream; charset=utf-8",
+          "cache-control": "no-cache, no-transform",
+          "x-should-retry": "false",
+        },
+      })
+    : Response.json(result, { headers: { "x-should-retry": "false" } });
+}
+
 function citationTitle(url: string): string {
   try {
     return new URL(url).hostname.replace(/^www\./, "");
