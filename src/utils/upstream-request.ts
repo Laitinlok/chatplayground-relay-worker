@@ -283,7 +283,6 @@ function collapseHistory(messages: UpstreamMessage[]): UpstreamMessage[] {
 }
 
 /** Preserve a lone message's original payload without adding a transcript label. */
-/** Preserve a lone message's original payload without adding a transcript label. */
 function singleMessageContent(
   message: UpstreamMessage,
 ): UpstreamMessage["content"] {
