@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   formatCitations,
   formatThinkTags,
@@ -195,6 +195,55 @@ describe("formatThinkTags", () => {
     );
   });
 });
+describe("streamUpstreamAsOpenAI trailer compatibility", () => {
+  const meta = { id: "chatcmpl-test", model: "test-model", created: 1 };
+
+  async function streamedContent(chunks: string[]): Promise<string> {
+    const output = await readStream(
+      streamUpstreamAsOpenAI(upstreamBody(chunks), meta),
+    );
+    return ssePayloads(output)
+      .map(
+        (payload) =>
+          (
+            payload.choices as Array<{
+              delta: Record<string, unknown>;
+            }>
+          )[0]?.delta.content,
+      )
+      .filter((value): value is string => typeof value === "string")
+      .join("");
+  }
+
+  it("removes a leading sentinel and streams the answer", async () => {
+    expect(await streamedContent([` CHAT_ID:${CUID}\\nHi back!`])).toBe(
+      "Hi back!",
+    );
+  });
+
+  it("removes a sentinel embedded in streamed prose", async () => {
+    expect(await streamedContent([`before CHAT_ID:${CUID} after`])).toBe(
+      "before after",
+    );
+  });
+
+  it("cancels upstream reading when the response reader is cancelled", async () => {
+    const cancel = vi.fn();
+    const upstream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode("x".repeat(500)));
+      },
+      cancel,
+    });
+
+    const reader = streamUpstreamAsOpenAI(upstream, meta).getReader();
+    await reader.read();
+    await reader.cancel("client disconnected");
+
+    expect(cancel).toHaveBeenCalledWith("client disconnected");
+  });
+});
+
 describe("formatCitations", () => {
   it("returns an empty string for no citations", () => {
     expect(formatCitations([])).toBe("");
