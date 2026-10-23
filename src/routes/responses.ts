@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import type { OpenAITool } from "../utils/tool-shim";
 import { CHAT_TIMEOUT } from "../constants/timeouts";
 import type { Env, Variables } from "../types/env";
+import type { OpenAIMessage } from "../types/openai";
 import type {
   ResponsesRequest,
   ResponsesResponse,
@@ -157,7 +158,7 @@ export function addHostedWebSearches(
 
 function hostedSearchResponse(
   model: string,
-  messages: ResponsesRequest["messages"] extends never ? never : import("../types/openai").OpenAIMessage[],
+  messages: OpenAIMessage[],
   searches: readonly { query: string; results: WebSearchResult[] }[],
   fallbackCalls: ReturnType<typeof gateToolCalls>["calls"],
   stream: boolean | undefined,
