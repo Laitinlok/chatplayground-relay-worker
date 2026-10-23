@@ -51,10 +51,9 @@ export async function collectUpstream(
 }
 
 /**
- * Strip trailing CHAT_ID sentinel and perplexity CITATIONS payload from a
- * fully-buffered upstream response. Order-tolerant: CITATIONS is matched
- * with no anchor first, so either ordering (CITATIONS-then-CHAT_ID or
- * CHAT_ID-then-CITATIONS) is handled.
+ * Strip CHAT_ID sentinels and the perplexity CITATIONS payload from a
+ * fully-buffered upstream response. Handles leading sentinels, sentinels
+ * embedded in prose, and either citation/sentinel ordering.
  */
 export function parseTrailers(buf: string): ParsedUpstream {
   const leadingSentinel = LEADING_SENTINEL_RE.exec(buf);
@@ -236,9 +235,9 @@ interface ChunkMeta {
  * flush boundary at the earliest marker and stop flushing past it, so the
  * trailer never reaches the client mid-stream.
  *
- * At stream end we parse the held-back tail, emit any remaining prose, and —
- * if perplexity citations were collected — append a Markdown sources block
- * as one final delta before the `[DONE]` terminator.
+ * At stream end we parse the buffered response, emit any remaining prose,
+ * and — if perplexity citations were collected — append a Markdown sources
+ * block as one final delta before the `[DONE]` terminator.
  */
 export function streamUpstreamAsOpenAI(
   body: ReadableStream<Uint8Array>,
