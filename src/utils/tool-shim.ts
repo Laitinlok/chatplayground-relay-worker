@@ -47,9 +47,14 @@ function toolNameSuggestsFetch(name: string): boolean {
 
 function isSearchTool(tool: OpenAITool): boolean {
   const parameters = toolParameterNames(tool);
+  const hasSearchQuery =
+    parameters.includes("query") || parameters.includes("search_query");
+  const hasWebSearchDefinition = /\b(?:web search|search the web|search the internet|internet search|browser search|duckduckgo)\b/i.test(
+    tool.function.description ?? "",
+  );
   return (
-    toolNameSuggestsSearch(tool.function.name) &&
-    (parameters.includes("query") || parameters.includes("search_query"))
+    hasSearchQuery &&
+    (toolNameSuggestsSearch(tool.function.name) || hasWebSearchDefinition)
   );
 }
 
