@@ -283,7 +283,10 @@ function collapseHistory(messages: UpstreamMessage[]): UpstreamMessage[] {
 }
 
 /** Preserve a lone message's original payload without adding a transcript label. */
-function singleMessageContent(message: UpstreamMessage): UpstreamMessage["content"] {
+/** Preserve a lone message's original payload without adding a transcript label. */
+function singleMessageContent(
+  message: UpstreamMessage,
+): UpstreamMessage["content"] {
   if (typeof message.content === "string") {
     return boundTranscript(message.content) as string;
   }
@@ -296,7 +299,8 @@ function boundTranscript(
 ): string | UpstreamContentPart[] {
   if (typeof content === "string") {
     if (content.length <= MAX_UPSTREAM_MESSAGE_CHARS) return content;
-    let start = content.length - (MAX_UPSTREAM_MESSAGE_CHARS - OMITTED_CONTEXT.length);
+    let start =
+      content.length - (MAX_UPSTREAM_MESSAGE_CHARS - OMITTED_CONTEXT.length);
     const firstCode = content.charCodeAt(start);
     if (firstCode >= 0xdc00 && firstCode <= 0xdfff) start++;
     return `${OMITTED_CONTEXT}${content.slice(start)}`;
