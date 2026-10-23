@@ -103,6 +103,50 @@ describe("Cloudflare Search web search", () => {
     expect(String(init.body)).toContain("token=test-search-token");
   });
 
+  it("parses the Cloudflare Web Search API items envelope", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      Response.json({
+        items: [
+          {
+            title: "Workers Web Search",
+            url: "https://developers.cloudflare.com/web-search/",
+            description: "Cloudflare's Web Search API returns items.",
+          },
+          {
+            title: "Alternate URL field",
+            link: "https://example.org/alternate",
+            description: "Link-shaped result.",
+          },
+        ],
+        metadata: { query: "Cloudflare web search" },
+      }),
+    );
+
+    await expect(
+      webSearch("Cloudflare web search", {
+        url: "https://search.example.test",
+        provider: "configured",
+      }),
+    ).resolves.toEqual([
+      {
+        title: "Workers Web Search",
+        url: "https://developers.cloudflare.com/web-search/",
+        snippet: "Cloudflare's Web Search API returns items.",
+      },
+      {
+        title: "Alternate URL field",
+        url: "https://example.org/alternate",
+        snippet: "Link-shaped result.",
+      },
+    ]);
+    expect(vi.mocked(fetch).mock.calls).toHaveLength(2);
+    expect(
+      vi.mocked(fetch).mock.calls.every(([input]) =>
+        String(input).startsWith("https://search.example.test/"),
+      ),
+    ).toBe(true);
+  });
+
   it("normalizes Cloudflare Search content fields and safely caps result counts", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       Response.json({
