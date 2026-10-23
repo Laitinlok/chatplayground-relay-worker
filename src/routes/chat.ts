@@ -106,8 +106,9 @@ async function chatCacheKey(
   const sessionHash = Array.from(new Uint8Array(digest), (byte) =>
     byte.toString(16).padStart(2, "0"),
   ).join("");
- 
- return `chat:${deploymentVersion}:${conversationId ?? `${sessionHash}:${modelId}`}`;
+ const hourBucket = Math.floor(Date.now() / (60 * 60 * 1000));
+
+ return `chat:${deploymentVersion}:${hourBucket}:${conversationId ?? `${sessionHash}:${modelId}`}`;
 }
 
 async function loadCachedChatId(env: Env, key: string): Promise<string | null> {
