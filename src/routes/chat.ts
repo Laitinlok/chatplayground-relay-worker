@@ -14,6 +14,7 @@ import {
   buildUpstreamHeaders,
   buildUpstreamRequest,
   endpointUrl,
+  requiresNewPromptOnly,
 } from "../utils/upstream-request";
 import {
   collectUpstream,
@@ -144,6 +145,7 @@ chat.post("/v1/chat/completions", async (c) => {
   const model = findModel(body.model, registry);
   if (!model) throw modelNotFound(body.model);
   const isLuna = model.modelName.toLowerCase().includes("luna");
+  const promptOnlyAgent = requiresNewPromptOnly(model);
   const sessionToken = await c.get("sessionToken")();
   await bridgeInlineImages(body.messages, c.env, sessionToken);
 
@@ -153,7 +155,7 @@ chat.post("/v1/chat/completions", async (c) => {
   const conversationId = c.req.header("x-conversation-id") ?? undefined;
   const cacheKey = await chatCacheKey(sessionToken, model.id, conversationId);
 
-  if (!body.user) {
+  if (!promptOnlyAgent && !body.user) {
     const cachedChatId = await loadCachedChatId(c.env, cacheKey);
     if (cachedChatId) {
       body.user = cachedChatId;
@@ -323,7 +325,8 @@ chat.post("/v1/chat/completions", async (c) => {
   rawContent = parsed.content;
   citations = parsed.citations;
   chatId = parsed.chatId;
-  if (chatId) await saveCachedChatId(c.env, cacheKey, chatId);
+  if (chatId && !promptOnlyAgent)
+    await saveCachedChatId(c.env, cacheKey, chatId);
   let toolGate = toolsRequested
     ? gateToolCalls(rawContent, body.tools)
     : { calls: [], rejections: [] as string[] };
@@ -363,7 +366,7 @@ chat.post("/v1/chat/completions", async (c) => {
         citations = gateParsed.citations;
         if (gateParsed.chatId) {
           chatId = gateParsed.chatId;
-          await saveCachedChatId(c.env, cacheKey, chatId);
+          if (!promptOnlyAgent) await saveCachedChatId(c.env, cacheKey, chatId);
         }
         toolGate = gated;
         toolCall = gated.calls[0] ?? null;
@@ -416,7 +419,7 @@ chat.post("/v1/chat/completions", async (c) => {
         citations = retryParsed.citations;
         if (retryParsed.chatId) {
           chatId = retryParsed.chatId;
-          await saveCachedChatId(c.env, cacheKey, chatId);
+          if (!promptOnlyAgent) await saveCachedChatId(c.env, cacheKey, chatId);
         }
       }
     }
@@ -450,7 +453,7 @@ chat.post("/v1/chat/completions", async (c) => {
 
   if (body.stream) {
     const onChatId = (value: string) => {
-      void saveCachedChatId(c.env, cacheKey, value);
+      if (!promptOnlyAgent) void saveCachedChatId(c.env, cacheKey, value);
     };
     const sse = toolsRequested
       ? streamUpstreamWithToolShim(finalBody, {
