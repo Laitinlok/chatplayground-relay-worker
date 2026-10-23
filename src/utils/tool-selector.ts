@@ -53,6 +53,7 @@ export async function rankToolsByEmbedding(
  ai?: EmbeddingAI,
 ): Promise<RankedToolCandidates | null> {
  if (!ai || !userText.trim() || tools.length === 0) return null;
+ if (tools.length > MAX_EMBEDDING_TOOLS) return null;
  const descriptions = tools.map((tool) =>
  [
  `Tool: ${tool.function.name}`,
@@ -93,7 +94,8 @@ export async function rankToolsByEmbedding(
  tools: ranked.map((item) => item.tool),
  topScore,
  margin,
- confident: topScore >= TOOL_MATCH_THRESHOLD && margin >= 0.025,
+ confident:
+ topScore >= TOOL_MATCH_THRESHOLD && margin >= TOOL_MATCH_MARGIN,
  };
  } catch {
  // Embeddings are an optional ranking signal; unavailable AI must not break routing.
