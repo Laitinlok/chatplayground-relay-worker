@@ -55,7 +55,7 @@ export async function rankToolsByEmbedding(
 ): Promise<RankedToolCandidates | null> {
   if (!ai || !userText.trim() || tools.length === 0) return null;
   if (tools.length > MAX_EMBEDDING_TOOLS) return null;
-  const descriptions = tools.map((tool) =>
+  const descriptions = tools.slice(0, MAX_EMBEDDING_INPUTS).map((tool) =>
     [
       `Tool: ${tool.function.name}`,
       tool.function.description ?? "",
