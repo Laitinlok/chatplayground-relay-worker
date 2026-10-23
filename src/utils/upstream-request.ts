@@ -253,8 +253,18 @@ function collapseHistory(messages: UpstreamMessage[]): UpstreamMessage[] {
     return [{ role: "user", content }];
   }
 
+  const transcriptMessages = messages.filter(
+    (message) => !(message.role === "assistant" && message.content === ""),
+  );
+  if (transcriptMessages.length === 1) {
+    const only = transcriptMessages[0];
+    return only
+      ? [{ role: "user", content: singleMessageContent(only) }]
+      : [{ role: "user", content: "" }];
+  }
+
   const parts: UpstreamContentPart[] = [];
-  for (const [index, message] of messages.entries()) {
+  for (const [index, message] of transcriptMessages.entries()) {
     if (index > 0) parts.push({ type: "text", text: "\n\n" });
     const label =
       message.role === "user" &&
@@ -306,13 +316,16 @@ function boundTranscript(
   }
 
   let remaining = MAX_UPSTREAM_MESSAGE_CHARS - OMITTED_CONTEXT.length;
+  let truncated = false;
   const kept: UpstreamContentPart[] = [];
-  for (let i = content.length - 1; i >= 0 && remaining > 0; i--) {
+  let i = content.length - 1;
+  for (; i >= 0 && remaining > 0; i--) {
     const part = content[i];
     if (!part) continue;
     if (part.type === "text") {
       let text = part.text;
       if (text.length > remaining) {
+        truncated = true;
         text = text.slice(text.length - remaining);
         const firstCode = text.charCodeAt(0);
         if (firstCode >= 0xdc00 && firstCode <= 0xdfff) text = text.slice(1);
@@ -324,19 +337,22 @@ function boundTranscript(
       if (size <= remaining) {
         kept.push(part);
         remaining -= size;
+      } else {
+        truncated = true;
       }
     }
   }
+  if (i >= 0) truncated = true;
   const ordered = kept.reverse();
-  if (
-    ordered.length > 0 &&
-    ordered[0]?.type === "text" &&
-    ordered[0].text.length <= MAX_UPSTREAM_MESSAGE_CHARS - OMITTED_CONTEXT.length
-  ) {
-    ordered[0] = {
-      type: "text",
-      text: `${OMITTED_CONTEXT}${ordered[0].text}`,
-    };
+  if (truncated) {
+    if (ordered[0]?.type === "text") {
+      ordered[0] = {
+        type: "text",
+        text: `${OMITTED_CONTEXT}${ordered[0].text}`,
+      };
+    } else {
+      ordered.unshift({ type: "text", text: OMITTED_CONTEXT });
+    }
   }
   return ordered;
 }
