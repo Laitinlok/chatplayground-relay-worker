@@ -298,11 +298,12 @@ describe("buildUpstreamRequest — field mapping", () => {
       },
       AZURE_MODEL,
     );
-    expect(body.messages[0]?.content).toContain("<TOOL_CALL>");
+    expect(body.messages).toHaveLength(1);
+    expect(body.messages[0]?.content).toContain("Assistant: <TOOL_CALL>");
     expect(body.messages[0]?.content).toContain("tool: cron");
     expect(body.messages[0]?.content).toContain('{"action":"add"}');
-    expect(body.messages[1]?.content).toContain("<TOOL_RESULT>");
-    expect(body.messages[1]?.content).toContain("created");
+    expect(body.messages[0]?.content).toContain("Tool: <TOOL_RESULT>");
+    expect(body.messages[0]?.content).toContain("created");
   });
   it("forwards the requested output token limit", () => {
     const { body } = buildUpstreamRequest(
