@@ -10,7 +10,7 @@ import type {
 import { compactSearchToolResult } from "./search-tool-context";
 
 const MAX_UPSTREAM_MESSAGE_CHARS = 15_000;
-const OMITTED_CONTEXT = "…(earlier context omitted)\\n";
+const OMITTED_CONTEXT = "…(earlier context omitted)\n";
 
 function flattenContent(content: unknown): string {
   if (typeof content === "string") return content;
@@ -320,7 +320,7 @@ function boundTranscript(
   ) {
     ordered[0] = {
       type: "text",
-      text: `${OMITTED_CONTEXT.replace(/\\\\n$/, "\\n")}${ordered[0].text}`,
+      text: `${OMITTED_CONTEXT}${ordered[0].text}`,
     };
   }
   return ordered;
