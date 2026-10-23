@@ -243,13 +243,7 @@ function collapseHistory(messages: UpstreamMessage[]): UpstreamMessage[] {
   if (messages.length === 1) {
     const only = messages[0];
     if (!only) return [{ role: "user", content: "" }];
-    // A lone developer message is still not a valid upstream turn role.
-    return [
-      {
-        role: only.role === "system" ? "system" : "user",
-        content: only.content,
-      },
-    ];
+    return [{ role: "user", content: boundTranscript(only.content) }];
   }
 
   const parts: UpstreamContentPart[] = [];
