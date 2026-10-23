@@ -157,6 +157,62 @@ describe("POST /v1/chat/completions — model resolution", () => {
   });
 });
 
+describe("POST /v1/chat/completions — chatId cache", () => {
+  function cache() {
+    const values = new Map<string, string>();
+    return {
+      get: vi.fn(async (key: string) => values.get(key) ?? null),
+      put: vi.fn(async (key: string, value: string, _options?: unknown) => {
+        values.set(key, value);
+      }),
+      values,
+    };
+  }
+
+  it("expires chatIds after one hour and scopes cache entries by Worker version and hour", async () => {
+    const CHAT_CACHE = cache();
+    const start = 1_700_000_000_000;
+    vi.spyOn(Date, "now").mockReturnValue(start);
+    upstream(() => new Response(`first answer${CHAT_ID}`));
+
+    const first = await post(hello, {
+      ...env,
+      CHAT_CACHE,
+      CF_VERSION_METADATA: { id: "version-one" },
+    });
+    expect(first.status).toBe(200);
+    expect(CHAT_CACHE.put).toHaveBeenCalledWith(
+      expect.stringContaining("chat:version-one:"),
+      "clm1234567890abcdefgh",
+      { expirationTtl: 60 * 60 },
+    );
+
+    const firstKey = CHAT_CACHE.put.mock.calls[0]?.[0];
+    expect(firstKey).toContain(String(Math.floor(start / (60 * 60 * 1000))));
+
+    vi.mocked(fetch).mockClear();
+    upstream(() => new Response(`second answer${CHAT_ID}`));
+    vi.spyOn(Date, "now").mockReturnValue(start + 60 * 60 * 1000);
+    const nextHour = await post(hello, {
+      ...env,
+      CHAT_CACHE,
+      CF_VERSION_METADATA: { id: "version-one" },
+    });
+    expect(nextHour.status).toBe(200);
+    expect(JSON.parse(String(chatCall()[1].body)).chatId).toBe("");
+
+    vi.mocked(fetch).mockClear();
+    upstream(() => new Response(`third answer${CHAT_ID}`));
+    const nextVersion = await post(hello, {
+      ...env,
+      CHAT_CACHE,
+      CF_VERSION_METADATA: { id: "version-two" },
+    });
+    expect(nextVersion.status).toBe(200);
+    expect(JSON.parse(String(chatCall()[1].body)).chatId).toBe("");
+  });
+});
+
 describe("POST /v1/chat/completions — upstream failures", () => {
   it("keeps a 403 on its own status and forwards upstream's own wording", async () => {
     upstream(
