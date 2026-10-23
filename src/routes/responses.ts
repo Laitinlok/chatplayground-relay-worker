@@ -895,7 +895,7 @@ responses.post("/v1/responses", async (c) => {
             fallbackCall,
             request.messages,
           );
-          const fallbackResult = addHostedWebSearch(fallbackBase, query, []);
+          // Failed hosted search is handed back to the caller's function without an empty hosted-search item.
           return raw.stream
             ? new Response(streamResponse(fallbackResult, fallbackCall), {
                 headers: {
