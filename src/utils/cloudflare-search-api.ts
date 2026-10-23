@@ -134,9 +134,15 @@ function compactResults(results: WebSearchResult[]): WebSearchResult[] {
 function normalizeResult(
   value: Record<string, unknown>,
 ): WebSearchResult | null {
-  if (typeof value.url !== "string") return null;
+  const resultUrl =
+    typeof value.url === "string"
+      ? value.url
+      : typeof value.link === "string"
+        ? value.link
+        : null;
+  if (!resultUrl) return null;
   try {
-    const url = new URL(value.url);
+    const url = new URL(resultUrl);
     if (url.protocol !== "https:" && url.protocol !== "http:") return null;
     return {
       title:
@@ -261,11 +267,16 @@ function parseCloudflarePayload(
   payload: unknown,
   count: number,
 ): WebSearchResult[] {
-  const rawResults =
-    payload &&
-    typeof payload === "object" &&
-    Array.isArray((payload as { results?: unknown }).results)
-      ? (payload as { results: unknown[] }).results
+  const envelope =
+    payload && typeof payload === "object" && !Array.isArray(payload)
+      ? (payload as Record<string, unknown>)
+      : null;
+  // Cloudflare Web Search API returns results under `items`; the relay's
+  // existing search aggregator and You.com-compatible providers use `results`.
+  const rawResults = Array.isArray(envelope?.items)
+    ? envelope.items
+    : Array.isArray(envelope?.results)
+      ? envelope.results
       : [];
   return compactResults(
     rawResults
