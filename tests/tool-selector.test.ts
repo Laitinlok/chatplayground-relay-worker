@@ -5,6 +5,7 @@ import {
   prioritizeSearchTools,
   createSearchToolCall,
   rankToolsByEmbedding,
+ isVeryBasicQuery,
 } from "../src/utils/tool-selector";
 import type { OpenAITool } from "../src/utils/tool-shim";
 
@@ -78,6 +79,22 @@ describe("embedding-assisted tool ranking", () => {
       }),
     ).resolves.toBeNull();
   });
+});
+
+describe("automatic tool-choice defaults", () => {
+ it.each(["Hi", "thanks!", "OK.", "Who are you?"])(
+  "recognizes very basic query %s",
+  (query) => {
+   expect(isVeryBasicQuery(query)).toBe(true);
+  },
+ );
+
+ it.each(["Explain photosynthesis", "latest AI news", "Search for pottery guides"])(
+  "does not suppress tools for substantive query %s",
+  (query) => {
+   expect(isVeryBasicQuery(query)).toBe(false);
+  },
+ );
 });
 
 describe("web tool classification", () => {

@@ -187,6 +187,18 @@ export function shouldSearchWeb(value: string): boolean {
   );
 }
 
+/** Avoid invoking tools for simple conversational acknowledgements. */
+export function isVeryBasicQuery(value: string): boolean {
+  const normalized = value
+    .trim()
+    .toLowerCase()
+    .replace(/[.!?,]+$/g, "")
+    .replace(/\s+/g, " ");
+  return /^(?:hi|hello|hey|good morning|good afternoon|good evening|thanks|thank you|ok|okay|sure|yes|no|bye|goodbye|who are you|what can you do)$/.test(
+    normalized,
+  );
+}
+
 function latestUserText(request: ChatCompletionRequest): string {
   const user = [...request.messages]
     .toReversed()

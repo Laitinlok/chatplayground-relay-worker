@@ -39,6 +39,7 @@ import { declinedToolUse } from "../utils/search-query";
 import { bridgeInlineImages } from "../utils/image-bridge";
 import {
   isSearchTool,
+  isVeryBasicQuery,
   prioritizeSearchTools,
   selectToolForAutoChoice,
 } from "../utils/tool-selector";
@@ -216,10 +217,17 @@ chat.post("/v1/chat/completions", async (c) => {
         ),
     );
   });
+  const userText = latestUserText(body.messages);
+  if (
+    isVeryBasicQuery(userText) &&
+    (body.tool_choice === undefined || body.tool_choice === "auto")
+  ) {
+    body.tool_choice = "none";
+  }
   const toolsForModel = prioritizeSearchTools(
     requestedTools,
     hasRelaySearchResult || typeof body.tool_choice === "object",
-    latestUserText(body.messages),
+    userText,
   );
   const toolsRequested =
     toolsForModel.length > 0 && body.tool_choice !== "none";
@@ -238,7 +246,7 @@ chat.post("/v1/chat/completions", async (c) => {
   let selectedTool: ReturnType<typeof tryParseRelayToolCall> = null;
   if (toolsRequested) {
     body.tools = toolsForModel;
-    selectedTool = hasToolResult
+    selectedTool = hasToolResult || isVeryBasicQuery(userText)
       ? null
       : await selectToolForAutoChoice(body, model, c.env, sessionToken);
     if (selectedTool) {

@@ -232,15 +232,7 @@ describe("POST /v1/responses — Luna reliability", () => {
           return new Response(`Grounded answer.${CHAT_ID}`);
         }
         if (url.includes("api.you.com")) {
-          return Response.json({
-            results: [
-              {
-                title: "News",
-                url: "https://example.test/news",
-                snippet: "AI news.",
-              },
-            ],
-          });
+          return new Response("Unavailable", { status: 503 });
         }
         return new Promise<Response>((_resolve, reject) => {
           init?.signal?.addEventListener(
@@ -460,8 +452,8 @@ params: {"query":"help me find something"}
     expect(
       payload.output?.some((item) => item.type === "web_search_call"),
     ).toBe(true);
-    expect(payload.output_text).toContain("Found the news");
-    expect(chats).toBe(2);
+    expect(payload.output_text).toBe("");
+    expect(chats).toBe(0);
   });
 
   it("does not delegate when multiple client search tools are ambiguous", async () => {
@@ -523,7 +515,8 @@ params: {"query":"help me find something"}
     expect(payload.output?.some((item) => item.type === "function_call")).toBe(
       false,
     );
-    expect(payload.output_text).toContain("Found the news");
+    expect(payload.output_text).toBe("");
+    expect(chats).toBe(0);
   });
 
   it("does not expose OpenAI hosted search to Grok for a basic question", async () => {
@@ -550,7 +543,26 @@ params: {"query":"help me find something"}
     );
   });
 
-  it("executes an OpenAI hosted web-search request instead of returning a client function call", async () => {
+  it("preserves an explicitly forced hosted-search tool on a basic prompt", async () => {
+ upstream((url) =>
+  url.includes("/api/chat/")
+   ? new Response(`Direct result.${CHAT_ID}`)
+   : new Response("Not found", { status: 404 }),
+ );
+ const res = await post({
+  model: "gpt-6-luna",
+  input: "Hello",
+  tools: [{ type: "web_search_preview" }],
+  tool_choice: { type: "function", name: "web_search_preview" },
+ });
+ expect(res.status).toBe(200);
+ const payload = (await res.json()) as {
+  output?: Array<{ type?: string; status?: string }>;
+ };
+ expect(payload.output?.some((item) => item.type === "web_search_call")).toBe(true);
+ });
+
+ it("executes an OpenAI hosted web-search request instead of returning a client function call", async () => {
     let chatCalls = 0;
     upstream((url) => {
       if (url.includes("/api/chat/")) {
@@ -586,17 +598,68 @@ params: {"query":"help me find something"}
       output_text?: string;
       output?: Array<{ type?: string }>;
     };
-    expect(payload.output_text).toContain("latest AI news");
+    expect(payload.output_text).toBe("");
     expect(
       payload.output?.some((item) => item.type === "web_search_call"),
     ).toBe(true);
     expect(payload.output?.some((item) => item.type === "function_call")).toBe(
       false,
     );
-    expect(chatCalls).toBe(2);
+    expect(chatCalls).toBe(0);
   });
 
-  it("returns configured Cloudflare Web Search API items in the OpenAI search block", async () => {
+  it("hands off timed-out hosted searches as a client search function call", async () => {
+ vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+  const url = String(input);
+  if (url.endsWith("/api/models")) return Response.json(FEED);
+  if (url.includes("/api/chat/")) {
+   return new Response(
+    `<TOOL_CALL>\ntool: web_search\nparams: {"query":"latest AI news and current AI regulation"}\n</TOOL_CALL>${CHAT_ID}`,
+   );
+  }
+  if (url.startsWith("https://search.example.test/")) {
+   return new Promise<Response>((_resolve, reject) => {
+    init?.signal?.addEventListener(
+     "abort",
+     () => reject(new Error("search aborted at handoff")),
+     { once: true },
+    );
+   });
+  }
+  return new Response("Not found", { status: 404 });
+ });
+ const res = await post(
+  {
+   model: "grok-4.6",
+   input: "latest AI news and current AI regulation",
+   tools: [
+    { type: "web_search_preview" },
+    {
+     type: "function",
+     name: "web_search_client",
+     description: "Search the web for more detailed results.",
+     parameters: {
+      type: "object",
+      properties: { query: { type: "string" } },
+      required: ["query"],
+     },
+    },
+   ],
+  },
+  { ...env, CLOUDFLARE_SEARCH_URL: "https://search.example.test" },
+ );
+ expect(res.status).toBe(200);
+ const payload = (await res.json()) as {
+  output?: Array<{ type?: string; name?: string; arguments?: string }>;
+ };
+ expect(payload.output?.some((item) => item.type === "web_search_call")).toBe(false);
+ expect(payload.output?.find((item) => item.type === "function_call")).toMatchObject({
+  name: "web_search_client",
+  arguments: '{"query":"latest AI news and current AI regulation"}',
+ });
+ });
+
+ it("returns configured Cloudflare Web Search API items in the OpenAI search block", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
       const url = String(input);
       if (url.endsWith("/api/models")) return Response.json(FEED);
@@ -682,8 +745,8 @@ params: {"query":"help me find something"}
     expect(
       payload.output?.some((item) => item.type === "web_search_call"),
     ).toBe(true);
-    expect(payload.output_text).toContain("Found the guide");
-    expect(chats).toBe(2);
+    expect(payload.output_text).toBe("");
+    expect(chats).toBe(0);
   });
 
   it("preserves ordinary function calls for the Responses client", async () => {
@@ -789,7 +852,7 @@ params: {"query":"help me find something"}
     expect(chats).toBeGreaterThan(1);
   });
 
-  it("makes Luna answer directly from hosted search results after a verification refusal", async () => {
+  it("returns hosted search results without waiting for a synthesis turn", async () => {
     let chats = 0;
     upstream((url) => {
       if (url.includes("/api/chat/")) {
@@ -822,18 +885,15 @@ params: {"query":"help me find something"}
     });
 
     expect(res.status).toBe(200);
-    const payload = (await res.json()) as { output_text?: string };
-    expect(payload.output_text).toContain(
-      "Yes. The event occurred, according to the search result.",
-    );
-    expect(chats).toBe(2);
-    const repair = JSON.stringify(chatBodies()[1]?.messages);
-    expect(repair).toContain(
-      "Treat this result as evidence for the user's original question",
-    );
-    expect(repair).toContain(
-      "do not say you cannot verify it or merely list the result",
-    );
+    const payload = (await res.json()) as {
+      output_text?: string;
+      output?: Array<{ type?: string }>;
+    };
+    expect(payload.output_text).toBe("");
+    expect(
+      payload.output?.some((item) => item.type === "web_search_call"),
+    ).toBe(true);
+    expect(chats).toBe(0);
   });
 
   it("renders hosted search as an Agora OpenAI Search output item", async () => {

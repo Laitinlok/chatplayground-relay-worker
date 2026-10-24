@@ -50,6 +50,7 @@ import {
   shouldSearchWeb,
   prioritizeSearchTools,
   selectToolForAutoChoice,
+  isVeryBasicQuery,
 } from "../utils/tool-selector";
 import { resolveCitationTitles } from "../utils/citation-titles";
 import { resolveReasoningEffort } from "../utils/reasoning-prefill";
@@ -775,13 +776,25 @@ responses.post("/v1/responses", async (c) => {
     (message) => message.role === "tool",
   );
   const needsHostedSearch = shouldSearchWeb(latestUserText);
-  // OpenAI hosted search is opt-in through its Responses tool. Do not expose
-  // it to the answer model for ordinary prompts; otherwise providers such as
-  // Grok can choose an unnecessary search and delay a basic answer.
+  const forcedToolName =
+    typeof request.tool_choice === "object" && "function" in request.tool_choice
+      ? request.tool_choice.function.name
+      : null;
+  const forcedHostedSearch =
+    forcedToolName !== null && hostedSearchNames.has(forcedToolName);
+  if (
+    isVeryBasicQuery(latestUserText) &&
+    (request.tool_choice === undefined || request.tool_choice === "auto")
+  ) {
+    request.tool_choice = "none";
+  }
+  // Keep hosted search hidden for ordinary prompts, except when the caller
+  // explicitly selected that named search tool.
   const toolsForModel = prioritizeSearchTools(
     tools.filter(
       (tool) =>
         needsHostedSearch ||
+        (forcedHostedSearch && tool.function.name === forcedToolName) ||
         (!hostedSearchNames.has(tool.function.name) &&
           !(preferredResponsesSearch && isFetchTool(tool))),
     ),
@@ -810,7 +823,9 @@ responses.post("/v1/responses", async (c) => {
   if (toolsRequested) {
     request.tools = toolsForModel;
     selectedTool =
-      hasToolResult || preferredResponsesSearch
+      hasToolResult ||
+      preferredResponsesSearch ||
+      isVeryBasicQuery(latestUserText)
         ? null
         : await selectToolForAutoChoice(request, model, c.env, sessionToken);
     if (selectedTool) {
@@ -855,15 +870,15 @@ responses.post("/v1/responses", async (c) => {
       isSearchTool(tool) &&
       tool.function.name !== "web_fetch",
   );
-  const canClientFallback =
-    clientSearchTools.length === 1 && typeof raw.tool_choice !== "object";
   const canPreflightSearch =
     !hasToolResult &&
-    canClientFallback &&
+    !isVeryBasicQuery(latestUserText) &&
+    (!forcedToolName || forcedHostedSearch) &&
     initialHostedSearchTools.length === 1 &&
-    (raw.tool_choice === undefined ||
+    ((raw.tool_choice === undefined ||
       raw.tool_choice === "auto" ||
-      raw.tool_choice === "required") &&
+      raw.tool_choice === "required") ||
+      forcedHostedSearch) &&
     needsHostedSearch;
   if (canPreflightSearch) {
     const query = sanitizeSearchQuery(latestUserText);
@@ -872,6 +887,9 @@ responses.post("/v1/responses", async (c) => {
       const configuredController = new AbortController();
       let fallbackTimer: ReturnType<typeof setTimeout> | undefined;
       let results: WebSearchResult[] = [];
+      const canClientFallback =
+        clientSearchTools.length === 1 &&
+        (!forcedToolName || forcedHostedSearch);
       try {
         const configuredSearch = webSearch(query, {
           url: c.env.CLOUDFLARE_SEARCH_URL,
@@ -880,22 +898,35 @@ responses.post("/v1/responses", async (c) => {
           signal: configuredController.signal,
           provider: "all",
         });
-        results =
-          clientSearchTools.length === 1
-            ? await Promise.race([
-                configuredSearch,
-                new Promise<WebSearchResult[]>((resolve) => {
-                  fallbackTimer = setTimeout(() => {
-                    configuredController.abort();
-                    resolve([]);
-                  }, CLIENT_SEARCH_FALLBACK_MS);
-                }),
-              ])
-            : await configuredSearch;
+        if (canClientFallback) {
+          let resolveDeadline!: (results: WebSearchResult[]) => void;
+          const fallbackDeadline = new Promise<WebSearchResult[]>((resolve) => {
+            resolveDeadline = resolve;
+            fallbackTimer = setTimeout(() => {
+              configuredController.abort();
+              resolve([]);
+            }, CLIENT_SEARCH_FALLBACK_MS);
+          });
+          void configuredSearch.then((searchResults) => {
+            if (searchResults.length > 0) resolveDeadline(searchResults);
+          });
+          results = await Promise.race([
+            configuredSearch.then((searchResults) => {
+              if (searchResults.length === 0) {
+                return fallbackDeadline;
+              }
+              resolveDeadline(searchResults);
+              return searchResults;
+            }),
+            fallbackDeadline,
+          ]);
+        } else {
+          results = await configuredSearch;
+        }
       } finally {
         if (fallbackTimer !== undefined) clearTimeout(fallbackTimer);
       }
-      if (results.length === 0 && clientSearchTools.length === 1) {
+      if (results.length === 0 && canClientFallback) {
         // Reuse the name and parameter schema advertised by this client.
         // Do not make another model request merely to choose a fallback tool.
         const fallbackCall = createSearchToolCall(query, clientSearchTools);
@@ -920,7 +951,7 @@ responses.post("/v1/responses", async (c) => {
               });
         }
       }
-      if (results.length === 0) {
+      if (results.length === 0 && !canClientFallback) {
         const fallbackController = new AbortController();
         let fallbackTimeout: ReturnType<typeof setTimeout> | undefined;
         try {
@@ -1048,7 +1079,8 @@ responses.post("/v1/responses", async (c) => {
       request.tool_choice !== "none" &&
       (request.tool_choice === undefined ||
         request.tool_choice === "auto" ||
-        request.tool_choice === "required")
+        request.tool_choice === "required" ||
+        forcedHostedSearch)
         ? (request.tools?.filter(
             (tool) => tool.function.name === preferredResponsesSearch,
           ) ?? [])
@@ -1059,7 +1091,7 @@ responses.post("/v1/responses", async (c) => {
       initialGate.rejections.length === 0 &&
       !hasToolResult &&
       explicitHostedTool.length > 0 &&
-      needsHostedSearch
+      (needsHostedSearch || forcedHostedSearch)
         ? createSearchToolCall(latestUserText, explicitHostedTool)
         : null;
     toolGate = selectedSearch
