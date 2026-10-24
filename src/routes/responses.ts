@@ -880,7 +880,7 @@ responses.post("/v1/responses", async (c) => {
           token: c.env.CLOUDFLARE_SEARCH_TOKEN,
           count: preflightSearchResultCount,
           signal: configuredController.signal,
-          provider: "configured",
+          provider: "all",
         });
         results =
           clientSearchTools.length === 1
@@ -1225,8 +1225,8 @@ responses.post("/v1/responses", async (c) => {
             url: c.env.CLOUDFLARE_SEARCH_URL,
             token: c.env.CLOUDFLARE_SEARCH_TOKEN,
             count,
+            provider: "all",
             signal: searchController.signal,
-            provider: "configured",
           });
           results =
             clientSearchTools.length === 1
