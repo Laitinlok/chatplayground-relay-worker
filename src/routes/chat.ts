@@ -33,7 +33,6 @@ import {
   rejectedToolCallStub,
   toolCallRetrySignal,
   tryParseRelayToolCall,
-  tryParseRelayToolCalls,
 } from "../utils/tool-shim";
 import { declinedToolUse } from "../utils/search-query";
 import { bridgeInlineImages } from "../utils/image-bridge";
@@ -98,7 +97,7 @@ async function chatCacheKey(
   sessionToken: string,
   modelId: string,
   deploymentVersion: string,
- conversationId?: string,
+  conversationId?: string,
 ): Promise<string> {
   const digest = await crypto.subtle.digest(
     "SHA-256",
@@ -107,9 +106,9 @@ async function chatCacheKey(
   const sessionHash = Array.from(new Uint8Array(digest), (byte) =>
     byte.toString(16).padStart(2, "0"),
   ).join("");
- const hourBucket = Math.floor(Date.now() / (60 * 60 * 1000));
+  const hourBucket = Math.floor(Date.now() / (60 * 60 * 1000));
 
- return `chat:${deploymentVersion}:${hourBucket}:${conversationId ?? `${sessionHash}:${modelId}`}`;
+  return `chat:${deploymentVersion}:${hourBucket}:${conversationId ?? `${sessionHash}:${modelId}`}`;
 }
 
 async function loadCachedChatId(env: Env, key: string): Promise<string | null> {
@@ -158,12 +157,12 @@ chat.post("/v1/chat/completions", async (c) => {
   // a brand-new chatplayground chat (and quota) on every single request.
   const conversationId = c.req.header("x-conversation-id") ?? undefined;
   const deploymentVersion = c.env.CF_VERSION_METADATA?.id ?? "local";
- const cacheKey = await chatCacheKey(
- sessionToken,
- model.id,
- deploymentVersion,
- conversationId,
- );
+  const cacheKey = await chatCacheKey(
+    sessionToken,
+    model.id,
+    deploymentVersion,
+    conversationId,
+  );
 
   if (!promptOnlyAgent && !body.user) {
     const cachedChatId = await loadCachedChatId(c.env, cacheKey);
@@ -246,9 +245,15 @@ chat.post("/v1/chat/completions", async (c) => {
   let selectedTool: ReturnType<typeof tryParseRelayToolCall> = null;
   if (toolsRequested) {
     body.tools = toolsForModel;
-    selectedTool = hasToolResult || isVeryBasicQuery(userText)
+    selectedTool = isVeryBasicQuery(userText)
       ? null
-      : await selectToolForAutoChoice(body, model, c.env, sessionToken);
+      : await selectToolForAutoChoice(
+          body,
+          model,
+          c.env,
+          sessionToken,
+          hasRelaySearchResult,
+        );
     if (selectedTool) {
       body.tool_choice = {
         type: "function",
@@ -290,7 +295,12 @@ chat.post("/v1/chat/completions", async (c) => {
       start(controller) {
         controller.enqueue(
           new TextEncoder().encode(
-            `<TOOL_CALL>\ntool: ${selectedTool.function.name}\nparams:\n${selectedTool.function.arguments}\n</TOOL_CALL>`,
+            toolGate.calls
+              .map(
+                (call) =>
+                  `<TOOL_CALL>\ntool: ${call.function.name}\nparams:\n${call.function.arguments}\n</TOOL_CALL>`,
+              )
+              .join("\n"),
           ),
         );
         controller.close();
@@ -499,7 +509,7 @@ chat.post("/v1/chat/completions", async (c) => {
     });
   }
 
-  if (toolCall) {
+  if (toolGate.calls.length > 0) {
     const toolResponse: ChatCompletionResponse = {
       id,
       object: "chat.completion",
@@ -513,9 +523,7 @@ chat.post("/v1/chat/completions", async (c) => {
             // Tool-only assistant turn. `null` avoids clients rendering this
             // as a blank final response before processing tool_calls.
             content: null,
-            tool_calls: toolGate.calls.length
-              ? toolGate.calls
-              : tryParseRelayToolCalls(rawContent, body.tools),
+            tool_calls: toolGate.calls,
           },
           finish_reason: "tool_calls",
         },
@@ -597,7 +605,7 @@ function estimateUsage(
 
 function textChars(content: OpenAIMessage["content"]): number {
   if (content === null) return 0;
- if (typeof content === "string") return content.length;
+  if (typeof content === "string") return content.length;
   if (!Array.isArray(content)) return 0;
   let n = 0;
   for (const part of content) {

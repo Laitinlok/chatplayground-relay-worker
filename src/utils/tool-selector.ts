@@ -120,7 +120,11 @@ function parameterNames(tool: OpenAITool): string[] {
 
 function toolNameSuggestsSearch(name: string): boolean {
   const normalized = name.toLowerCase().replace(/[^a-z0-9]+/g, "_");
-  if (/(?:^|_)(?:conversation|conversations|rag|memory|memories|knowledge|document|vector|semantic)(?:_|$)/i.test(normalized))
+  if (
+    /(?:^|_)(?:conversation|conversations|rag|memory|memories|knowledge|document|vector|semantic)(?:_|$)/i.test(
+      normalized,
+    )
+  )
     return false;
   return /(?:^|_)(?:web|search|browsing|duckduckgo|ddg)(?:_|$)/i.test(
     normalized,
@@ -142,9 +146,10 @@ export function isSearchTool(tool: OpenAITool): boolean {
   const parameters = parameterNames(tool);
   const hasSearchQuery =
     parameters.includes("query") || parameters.includes("search_query");
-  const hasWebSearchDefinition = /\b(?:web search|search the web|search the internet|internet search|browser search|duckduckgo)\b/i.test(
-    tool.function.description ?? "",
-  );
+  const hasWebSearchDefinition =
+    /\b(?:web search|search the web|search the internet|internet search|browser search|duckduckgo)\b/i.test(
+      tool.function.description ?? "",
+    );
   return (
     hasSearchQuery &&
     (toolNameSuggestsSearch(tool.function.name) || hasWebSearchDefinition)
@@ -242,6 +247,7 @@ export async function selectToolForAutoChoice(
   model: ModelEntry,
   env: Env,
   sessionToken: string,
+  hasSearchResult = false,
 ): Promise<ReturnType<typeof gateToolCalls>["calls"][number] | null> {
   // Omitted tool_choice has OpenAI's `auto` semantics. Route every optional
   // tool turn through the selector so clients such as AnythingLLM cannot let

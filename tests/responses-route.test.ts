@@ -544,25 +544,27 @@ params: {"query":"help me find something"}
   });
 
   it("preserves an explicitly forced hosted-search tool on a basic prompt", async () => {
- upstream((url) =>
-  url.includes("/api/chat/")
-   ? new Response(`Direct result.${CHAT_ID}`)
-   : new Response("Not found", { status: 404 }),
- );
- const res = await post({
-  model: "gpt-6-luna",
-  input: "Hello",
-  tools: [{ type: "web_search_preview" }],
-  tool_choice: { type: "function", name: "web_search_preview" },
- });
- expect(res.status).toBe(200);
- const payload = (await res.json()) as {
-  output?: Array<{ type?: string; status?: string }>;
- };
- expect(payload.output?.some((item) => item.type === "web_search_call")).toBe(true);
- });
+    upstream((url) =>
+      url.includes("/api/chat/")
+        ? new Response(`Direct result.${CHAT_ID}`)
+        : new Response("Not found", { status: 404 }),
+    );
+    const res = await post({
+      model: "gpt-6-luna",
+      input: "Hello",
+      tools: [{ type: "web_search_preview" }],
+      tool_choice: { type: "function", name: "web_search_preview" },
+    });
+    expect(res.status).toBe(200);
+    const payload = (await res.json()) as {
+      output?: Array<{ type?: string; status?: string }>;
+    };
+    expect(
+      payload.output?.some((item) => item.type === "web_search_call"),
+    ).toBe(true);
+  });
 
- it("executes an OpenAI hosted web-search request instead of returning a client function call", async () => {
+  it("executes an OpenAI hosted web-search request instead of returning a client function call", async () => {
     let chatCalls = 0;
     upstream((url) => {
       if (url.includes("/api/chat/")) {
@@ -609,57 +611,61 @@ params: {"query":"help me find something"}
   });
 
   it("hands off timed-out hosted searches as a client search function call", async () => {
- vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
-  const url = String(input);
-  if (url.endsWith("/api/models")) return Response.json(FEED);
-  if (url.includes("/api/chat/")) {
-   return new Response(
-    `<TOOL_CALL>\ntool: web_search\nparams: {"query":"latest AI news and current AI regulation"}\n</TOOL_CALL>${CHAT_ID}`,
-   );
-  }
-  if (url.startsWith("https://search.example.test/")) {
-   return new Promise<Response>((_resolve, reject) => {
-    init?.signal?.addEventListener(
-     "abort",
-     () => reject(new Error("search aborted at handoff")),
-     { once: true },
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/api/models")) return Response.json(FEED);
+      if (url.includes("/api/chat/")) {
+        return new Response(
+          `<TOOL_CALL>\ntool: web_search\nparams: {"query":"latest AI news and current AI regulation"}\n</TOOL_CALL>${CHAT_ID}`,
+        );
+      }
+      if (url.startsWith("https://search.example.test/")) {
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener(
+            "abort",
+            () => reject(new Error("search aborted at handoff")),
+            { once: true },
+          );
+        });
+      }
+      return new Response("Not found", { status: 404 });
+    });
+    const res = await post(
+      {
+        model: "grok-4.6",
+        input: "latest AI news and current AI regulation",
+        tools: [
+          { type: "web_search_preview" },
+          {
+            type: "function",
+            name: "web_search_client",
+            description: "Search the web for more detailed results.",
+            parameters: {
+              type: "object",
+              properties: { query: { type: "string" } },
+              required: ["query"],
+            },
+          },
+        ],
+      },
+      { ...env, CLOUDFLARE_SEARCH_URL: "https://search.example.test" },
     );
-   });
-  }
-  return new Response("Not found", { status: 404 });
- });
- const res = await post(
-  {
-   model: "grok-4.6",
-   input: "latest AI news and current AI regulation",
-   tools: [
-    { type: "web_search_preview" },
-    {
-     type: "function",
-     name: "web_search_client",
-     description: "Search the web for more detailed results.",
-     parameters: {
-      type: "object",
-      properties: { query: { type: "string" } },
-      required: ["query"],
-     },
-    },
-   ],
-  },
-  { ...env, CLOUDFLARE_SEARCH_URL: "https://search.example.test" },
- );
- expect(res.status).toBe(200);
- const payload = (await res.json()) as {
-  output?: Array<{ type?: string; name?: string; arguments?: string }>;
- };
- expect(payload.output?.some((item) => item.type === "web_search_call")).toBe(false);
- expect(payload.output?.find((item) => item.type === "function_call")).toMatchObject({
-  name: "web_search_client",
-  arguments: '{"query":"latest AI news and current AI regulation"}',
- });
- });
+    expect(res.status).toBe(200);
+    const payload = (await res.json()) as {
+      output?: Array<{ type?: string; name?: string; arguments?: string }>;
+    };
+    expect(
+      payload.output?.some((item) => item.type === "web_search_call"),
+    ).toBe(false);
+    expect(
+      payload.output?.find((item) => item.type === "function_call"),
+    ).toMatchObject({
+      name: "web_search_client",
+      arguments: '{"query":"latest AI news and current AI regulation"}',
+    });
+  });
 
- it("returns configured Cloudflare Web Search API items in the OpenAI search block", async () => {
+  it("returns configured Cloudflare Web Search API items in the OpenAI search block", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
       const url = String(input);
       if (url.endsWith("/api/models")) return Response.json(FEED);
@@ -749,6 +755,54 @@ params: {"query":"help me find something"}
     expect(chats).toBe(0);
   });
 
+  it("does not suppress a fresh hosted search because of a previous function result", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/api/models")) return Response.json(FEED);
+      if (url.startsWith("https://search.example.test")) {
+        return Response.json({
+          results: [
+            {
+              title: "Latest AI news",
+              url: "https://example.test/news",
+              description: "A current report.",
+            },
+          ],
+        });
+      }
+      return new Response(`Here is the latest AI news.${CHAT_ID}`);
+    });
+    const res = await post(
+      {
+        model: "gpt-6-luna",
+        input: [
+          { role: "user", content: "Earlier question" },
+          {
+            type: "function_call",
+            call_id: "previous_call",
+            name: "get_weather",
+            arguments: '{"city":"Tokyo"}',
+          },
+          {
+            type: "function_call_output",
+            call_id: "previous_call",
+            output: "Tokyo is sunny",
+          },
+          { role: "user", content: "Latest AI news" },
+        ],
+        tools: [{ type: "web_search" }],
+      },
+      { ...env, CLOUDFLARE_SEARCH_URL: "https://search.example.test/api" },
+    );
+    expect(res.status).toBe(200);
+    const payload = (await res.json()) as {
+      output?: Array<{ type?: string }>;
+    };
+    expect(
+      payload.output?.some((item) => item.type === "web_search_call"),
+    ).toBe(true);
+  });
+
   it("preserves ordinary function calls for the Responses client", async () => {
     upstream((url) =>
       url.includes("/api/chat/")
@@ -782,6 +836,40 @@ params: {"query":"help me find something"}
       type: "function_call",
       name: "get_weather",
     });
+  });
+
+  it("preserves multiple valid function calls from one model response", async () => {
+    upstream((url) =>
+      url.includes("/api/chat/")
+        ? new Response(
+            `<TOOL_CALL>\ntool: get_weather\nparams: {"city":"Tokyo"}\n</TOOL_CALL>\n<TOOL_CALL>\ntool: get_weather\nparams: {"city":"Osaka"}\n</TOOL_CALL>${CHAT_ID}`,
+          )
+        : new Response("Not found", { status: 404 }),
+    );
+    const res = await post({
+      model: "gpt-6-luna",
+      input: "Get weather for Tokyo and Osaka",
+      tools: [
+        {
+          type: "function",
+          name: "get_weather",
+          parameters: {
+            type: "object",
+            properties: { city: { type: "string" } },
+            required: ["city"],
+          },
+        },
+      ],
+    });
+    expect(res.status).toBe(200);
+    const payload = (await res.json()) as {
+      output?: Array<{ type?: string; arguments?: string }>;
+    };
+    expect(
+      payload.output
+        ?.filter((item) => item.type === "function_call")
+        .map((item) => JSON.parse(item.arguments ?? "{}")),
+    ).toEqual([{ city: "Tokyo" }, { city: "Osaka" }]);
   });
 
   it("does not invoke tools when tool_choice is none", async () => {
@@ -1044,6 +1132,52 @@ params: {"query":"help me find something"}
     expect(
       payload.output?.some((item) => item.type === "web_search_call"),
     ).toBe(false);
+  });
+
+  it("preflights search on a new turn after an earlier tool result", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/api/models")) return Response.json(FEED);
+      if (url.startsWith("https://search.example.test")) {
+        return Response.json({
+          results: [
+            {
+              title: "Recent food hack",
+              url: "https://example.test/grapes",
+              description: "Freeze grapes.",
+            },
+          ],
+        });
+      }
+      return new Response(`The latest hack is freezing grapes.${CHAT_ID}`);
+    });
+    const res = await post(
+      {
+        model: "gpt-6-luna",
+        input: [
+          { role: "user", content: "Earlier question" },
+          {
+            type: "function_call",
+            call_id: "old_call",
+            name: "web_search",
+            arguments: '{"query":"earlier"}',
+          },
+          {
+            type: "function_call_output",
+            call_id: "old_call",
+            output: "Earlier result",
+          },
+          { role: "user", content: "Latest TikTok food hacks" },
+        ],
+        tools: [{ type: "web_search" }],
+      },
+      { ...env, CLOUDFLARE_SEARCH_URL: "https://search.example.test/api" },
+    );
+    expect(res.status).toBe(200);
+    const payload = (await res.json()) as { output?: Array<{ type?: string }> };
+    expect(
+      payload.output?.some((item) => item.type === "web_search_call"),
+    ).toBe(true);
   });
 
   it("retries once after a plan-only reply when a tool result is present", async () => {

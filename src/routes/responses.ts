@@ -772,9 +772,33 @@ responses.post("/v1/responses", async (c) => {
       }
       return found;
     }, "");
-  const hasToolResult = request.messages.some(
-    (message) => message.role === "tool",
+  const latestUserIndex = request.messages.findLastIndex(
+    (message) => message.role === "user",
   );
+  const currentTurnMessages = request.messages.slice(latestUserIndex + 1);
+  const hasRelaySearchResult = currentTurnMessages.some((message) => {
+    if (message.role !== "tool") return false;
+    if (
+      typeof message.name === "string" &&
+      tools.some(
+        (tool) => tool.function.name === message.name && isSearchTool(tool),
+      )
+    )
+      return true;
+    if (!message.tool_call_id) return false;
+    return request.messages.some(
+      (item) =>
+        item.role === "assistant" &&
+        item.tool_calls?.some(
+          (call) =>
+            call.id === message.tool_call_id &&
+            tools.some(
+              (tool) =>
+                tool.function.name === call.function.name && isSearchTool(tool),
+            ),
+        ),
+    );
+  });
   const needsHostedSearch = shouldSearchWeb(latestUserText);
   const forcedToolName =
     typeof request.tool_choice === "object" && "function" in request.tool_choice
@@ -798,7 +822,7 @@ responses.post("/v1/responses", async (c) => {
         (!hostedSearchNames.has(tool.function.name) &&
           !(preferredResponsesSearch && isFetchTool(tool))),
     ),
-    hasToolResult || typeof request.tool_choice === "object",
+    hasRelaySearchResult || typeof request.tool_choice === "object",
     latestUserText,
   );
   request.tools = toolsForModel.length > 0 ? toolsForModel : undefined;
@@ -823,11 +847,15 @@ responses.post("/v1/responses", async (c) => {
   if (toolsRequested) {
     request.tools = toolsForModel;
     selectedTool =
-      hasToolResult ||
-      preferredResponsesSearch ||
-      isVeryBasicQuery(latestUserText)
+      preferredResponsesSearch || isVeryBasicQuery(latestUserText)
         ? null
-        : await selectToolForAutoChoice(request, model, c.env, sessionToken);
+        : await selectToolForAutoChoice(
+            request,
+            model,
+            c.env,
+            sessionToken,
+            hasRelaySearchResult,
+          );
     if (selectedTool) {
       request.tool_choice = {
         type: "function",
@@ -871,13 +899,12 @@ responses.post("/v1/responses", async (c) => {
       tool.function.name !== "web_fetch",
   );
   const canPreflightSearch =
-    !hasToolResult &&
     !isVeryBasicQuery(latestUserText) &&
     (!forcedToolName || forcedHostedSearch) &&
     initialHostedSearchTools.length === 1 &&
-    ((raw.tool_choice === undefined ||
+    (raw.tool_choice === undefined ||
       raw.tool_choice === "auto" ||
-      raw.tool_choice === "required") ||
+      raw.tool_choice === "required" ||
       forcedHostedSearch) &&
     needsHostedSearch;
   if (canPreflightSearch) {
@@ -1089,7 +1116,6 @@ responses.post("/v1/responses", async (c) => {
       step === 0 &&
       initialGate.calls.length === 0 &&
       initialGate.rejections.length === 0 &&
-      !hasToolResult &&
       explicitHostedTool.length > 0 &&
       (needsHostedSearch || forcedHostedSearch)
         ? createSearchToolCall(latestUserText, explicitHostedTool)
@@ -1518,11 +1544,14 @@ responses.post("/v1/responses", async (c) => {
     undefined,
     reasoningContent,
   );
+  const responseToolCalls = fallbackToolCalls.length
+    ? fallbackToolCalls
+    : toolGate.calls;
   const baseResult =
-    fallbackToolCalls.length > 1
+    responseToolCalls.length > 1
       ? {
           ...singleCallResult,
-          output: fallbackToolCalls.flatMap((call) => {
+          output: responseToolCalls.flatMap((call) => {
             const output = singleCallResult.output.find(
               (item) => item.type === "function_call",
             );

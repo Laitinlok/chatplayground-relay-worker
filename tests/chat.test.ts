@@ -529,6 +529,98 @@ describe("POST /v1/chat/completions — delegated search tools", () => {
     ).toBe(0);
   });
 
+  it("selects a tool on a new turn after an earlier tool result", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/api/models")) return Response.json(FEED);
+        throw new Error("Selector should handle the new user turn");
+      },
+    );
+    const res = await post({
+      ...hello,
+      messages: [
+        { role: "user", content: "Earlier question" },
+        {
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            {
+              id: "call_old",
+              type: "function",
+              function: { name: "web_search", arguments: "{}" },
+            },
+          ],
+        },
+        {
+          role: "tool",
+          tool_call_id: "call_old",
+          content: "Earlier result",
+        },
+        { role: "user", content: "Latest TikTok food hacks" },
+      ],
+      tools: [
+        {
+          type: "function",
+          function: {
+            name: "web_search",
+            parameters: {
+              type: "object",
+              properties: { query: { type: "string" } },
+              required: ["query"],
+            },
+          },
+        },
+      ],
+    });
+
+    expect(res.status).toBe(200);
+    const payload = (await res.json()) as ChatCompletionResponse;
+    expect(payload.choices[0]?.finish_reason).toBe("tool_calls");
+    expect(payload.choices[0]?.message.tool_calls?.[0]?.function.name).toBe(
+      "web_search",
+    );
+    expect(
+      vi
+        .mocked(fetch)
+        .mock.calls.filter(([url]) => String(url).includes("/api/chat/")),
+    ).toHaveLength(0);
+  });
+
+  it("returns multiple valid tool calls from one model response", async () => {
+    upstream(
+      () =>
+        new Response(
+          `<TOOL_CALL>\ntool: create_document\nparams: {"title":"First"}\n</TOOL_CALL>\n<TOOL_CALL>\ntool: create_document\nparams: {"title":"Second"}\n</TOOL_CALL>${CHAT_ID}`,
+        ),
+    );
+    const res = await post({
+      ...hello,
+      tool_choice: "auto",
+      messages: [{ role: "user", content: "Create two documents" }],
+      tools: [
+        {
+          type: "function",
+          function: {
+            name: "create_document",
+            parameters: {
+              type: "object",
+              properties: { title: { type: "string" } },
+              required: ["title"],
+            },
+          },
+        },
+      ],
+    });
+    expect(res.status).toBe(200);
+    const payload = (await res.json()) as ChatCompletionResponse;
+    expect(
+      payload.choices[0]?.message.tool_calls?.map((call) =>
+        JSON.parse(call.function.arguments),
+      ),
+    ).toEqual([{ title: "First" }, { title: "Second" }]);
+  });
+
   it("leaves current-news tool selection to the model", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(
       async (input: RequestInfo | URL) => {
@@ -838,7 +930,11 @@ describe("POST /v1/chat/completions — chatId cache", () => {
       values,
       get: vi.fn(async (key: string) => values.get(key) ?? null),
       put: vi.fn(
-        async (key: string, value: string, _options?: { expirationTtl: number }) => {
+        async (
+          key: string,
+          value: string,
+          _options?: { expirationTtl: number },
+        ) => {
           values.set(key, value);
         },
       ),
