@@ -971,36 +971,6 @@ responses.post("/v1/responses", async (c) => {
         [],
         raw.stream,
       );
-      request.messages.push({
-        role: "assistant",
-        content: null,
-        tool_calls: [hostedCall],
-      });
-      request.messages.push({
-        role: "tool",
-        name: hostedCall.function.name,
-        content: compactSearchToolResult(
-          JSON.stringify({ query, count: results.length, results }),
-          hostedCall.function.name,
-        ),
-      });
-      request.messages.push({ role: "user", content: SEARCH_SYNTHESIS_PROMPT });
-      // Search is complete. Do not expose a caller-owned search tool on the
-      // synthesis turn; it could replace the completed hosted tool call.
-      const followUpTools = tools.filter(
-        (tool) =>
-          !hostedSearchNames.has(tool.function.name) && !isSearchTool(tool),
-      );
-      request.tools = followUpTools.length > 0 ? followUpTools : undefined;
-      request.tool_choice = followUpTools.length > 0 ? "auto" : "none";
-      if (followUpTools.length > 0) {
-        request.messages = injectToolPrompt(
-          request.messages,
-          followUpTools,
-          request.tool_choice,
-          model.endpoint === "perplexity" ? "perplexity" : undefined,
-        );
-      }
     }
   }
   let rawContent = "";
