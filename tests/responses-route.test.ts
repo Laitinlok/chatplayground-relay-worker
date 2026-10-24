@@ -283,12 +283,54 @@ describe("POST /v1/responses — Luna reliability", () => {
     },
   );
 
-  it("returns a search function on failure without an OpenAI search block or status text", async () => {
+  it("emits the native search function call when hosted and relay search both fail", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
       const url = String(input);
       if (url.endsWith("/api/models")) return Response.json(FEED);
       if (url.includes("/api/chat/")) {
         return new Response(`Grounded answer.${CHAT_ID}`);
+      }
+      return new Response("Unavailable", { status: 503 });
+    });
+
+    const res = await post(
+      {
+        model: "gpt-6-luna",
+        input: "Find current AI news",
+        tools: [{ type: "web_search" }],
+      },
+      { ...env, CLOUDFLARE_SEARCH_URL: "https://search.example.test" },
+    );
+
+    expect(res.status).toBe(200);
+    const payload = (await res.json()) as {
+      output?: Array<{
+        type?: string;
+        name?: string;
+        arguments?: string;
+      }>;
+      output_text?: string;
+    };
+    expect(payload.output_text).toBe("");
+    expect(
+      payload.output?.some((item) => item.type === "web_search_call"),
+    ).toBe(false);
+    expect(
+      payload.output?.find((item) => item.type === "function_call"),
+    ).toMatchObject({
+      name: "web_search",
+      arguments: '{"query":"Find current AI news"}',
+    });
+  });
+
+  it("constructs a client search function without a model call when hosted search fails", async () => {
+    let chatCalls = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/api/models")) return Response.json(FEED);
+      if (url.includes("/api/chat/")) {
+        chatCalls++;
+        return new Response(`Incorrect model-selected tool.${CHAT_ID}`);
       }
       return new Response("Unavailable", { status: 503 });
     });
@@ -315,58 +357,91 @@ describe("POST /v1/responses — Luna reliability", () => {
     );
     expect(res.status).toBe(200);
     const body = await res.text();
-    expect(body).toContain("web_browse");
+    expect(chatCalls).toBe(0);
+    expect(body).toContain('"type":"function_call"');
+    expect(body).toContain('"name":"web_browse"');
+    expect(body).toContain(
+      '"arguments":"{\\"query\\":\\"Find current AI news\\"}"',
+    );
+    expect(body).not.toContain("response.output_text.delta");
     expect(body).not.toContain("web_search_call");
     expect(body).not.toContain("OpenAI web search source");
   });
 
-  it("returns the client search function when a hosted call fails after model selection", async () => {
-    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
-      const url = String(input);
-      if (url.endsWith("/api/models")) return Response.json(FEED);
-      if (url.includes("/api/chat/")) {
-        return new Response(
-          `<TOOL_CALL>
-tool: web_search
-params: {"query":"help me find something"}
-</TOOL_CALL>${CHAT_ID}`,
+  it.each([false, true])(
+    "returns only a client search function when a hosted call fails after model selection (stream=%s)",
+    async (stream) => {
+      let chatCalls = 0;
+      vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+        const url = String(input);
+        if (url.endsWith("/api/models")) return Response.json(FEED);
+        if (url.includes("/api/chat/")) {
+          chatCalls++;
+          return new Response(
+            `I’ll search the web now.\n<TOOL_CALL>\ntool: web_search\nparams: {"query":"help me find something"}\n</TOOL_CALL>${CHAT_ID}`,
+          );
+        }
+        return new Response("Unavailable", { status: 503 });
+      });
+
+      const res = await post(
+        {
+          model: "gpt-6-luna",
+          input: "help me find something",
+          stream,
+          tools: [
+            { type: "web_search" },
+            {
+              type: "function",
+              name: "search_news",
+              parameters: {
+                type: "object",
+                properties: { query: { type: "string" } },
+                required: ["query"],
+              },
+            },
+          ],
+        },
+        { ...env, CLOUDFLARE_SEARCH_URL: "https://search.example.test" },
+      );
+
+      expect(res.status).toBe(200);
+      expect(chatCalls).toBe(1);
+      if (stream) {
+        const body = await res.text();
+        expect(body).toContain('"type":"function_call"');
+        expect(body).toContain('"name":"search_news"');
+        expect(body).toContain(
+          '"arguments":"{\\"query\\":\\"help me find something\\"}"',
+        );
+        expect(body).not.toContain("response.output_text.delta");
+        expect(body).not.toContain("I’ll search the web now.");
+        expect(body).not.toContain("OpenAI web search source");
+      } else {
+        const payload = (await res.json()) as {
+          output?: Array<{
+            type?: string;
+            name?: string;
+            arguments?: string;
+          }>;
+          output_text?: string;
+        };
+        expect(payload.output_text).toBe("");
+        expect(payload.output).toHaveLength(1);
+        expect(payload.output?.[0]).toMatchObject({
+          type: "function_call",
+          name: "search_news",
+          arguments: '{"query":"help me find something"}',
+        });
+        expect(JSON.stringify(payload)).not.toContain(
+          "I’ll search the web now.",
+        );
+        expect(JSON.stringify(payload)).not.toContain(
+          "OpenAI web search source",
         );
       }
-      return new Response("Unavailable", { status: 503 });
-    });
-
-    const res = await post(
-      {
-        model: "gpt-6-luna",
-        input: "help me find something",
-        tools: [
-          { type: "web_search" },
-          {
-            type: "function",
-            name: "search_news",
-            parameters: {
-              type: "object",
-              properties: { query: { type: "string" } },
-              required: ["query"],
-            },
-          },
-        ],
-      },
-      { ...env, CLOUDFLARE_SEARCH_URL: "https://search.example.test" },
-    );
-
-    expect(res.status).toBe(200);
-    const payload = (await res.json()) as {
-      output?: Array<{ type?: string; name?: string }>;
-    };
-    expect(
-      payload.output?.some((item) => item.type === "web_search_call"),
-    ).toBe(false);
-    expect(payload.output?.some((item) => item.type === "function_call")).toBe(
-      true,
-    );
-    expect(JSON.stringify(payload)).not.toContain("OpenAI web search source");
-  });
+    },
+  );
 
   it("returns a caller's custom search function without starting hosted search", async () => {
     const requests: string[] = [];
@@ -452,8 +527,8 @@ params: {"query":"help me find something"}
     expect(
       payload.output?.some((item) => item.type === "web_search_call"),
     ).toBe(true);
-    expect(payload.output_text).toBe("");
-    expect(chats).toBe(0);
+    expect(payload.output_text).toContain("Found the news.");
+    expect(chats).toBeGreaterThan(0);
   });
 
   it("does not delegate when multiple client search tools are ambiguous", async () => {
@@ -515,8 +590,8 @@ params: {"query":"help me find something"}
     expect(payload.output?.some((item) => item.type === "function_call")).toBe(
       false,
     );
-    expect(payload.output_text).toBe("");
-    expect(chats).toBe(0);
+    expect(payload.output_text).toContain("Found the news.");
+    expect(chats).toBeGreaterThan(0);
   });
 
   it("does not expose OpenAI hosted search to Grok for a basic question", async () => {
@@ -543,25 +618,39 @@ params: {"query":"help me find something"}
     );
   });
 
-  it("preserves an explicitly forced hosted-search tool on a basic prompt", async () => {
-    upstream((url) =>
-      url.includes("/api/chat/")
-        ? new Response(`Direct result.${CHAT_ID}`)
-        : new Response("Not found", { status: 404 }),
-    );
-    const res = await post({
-      model: "gpt-6-luna",
-      input: "Hello",
-      tools: [{ type: "web_search_preview" }],
-      tool_choice: { type: "function", name: "web_search_preview" },
+  it("hands off a failed explicitly forced hosted-search tool as a client function call", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/api/models")) return Response.json(FEED);
+      return new Response("Unavailable", { status: 503 });
     });
+    const res = await post(
+      {
+        model: "gpt-6-luna",
+        input: "Find current AI news",
+        tools: [{ type: "web_search_preview" }],
+        tool_choice: { type: "function", name: "web_search_preview" },
+      },
+      { ...env, CLOUDFLARE_SEARCH_URL: "https://search.example.test" },
+    );
     expect(res.status).toBe(200);
     const payload = (await res.json()) as {
-      output?: Array<{ type?: string; status?: string }>;
+      output?: Array<{
+        type?: string;
+        status?: string;
+        name?: string;
+        arguments?: string;
+      }>;
     };
     expect(
       payload.output?.some((item) => item.type === "web_search_call"),
-    ).toBe(true);
+    ).toBe(false);
+    expect(
+      payload.output?.find((item) => item.type === "function_call"),
+    ).toMatchObject({
+      name: "web_search_preview",
+      arguments: '{"query":"Find current AI news"}',
+    });
   });
 
   it("executes an OpenAI hosted web-search request instead of returning a client function call", async () => {
@@ -600,14 +689,16 @@ params: {"query":"help me find something"}
       output_text?: string;
       output?: Array<{ type?: string }>;
     };
-    expect(payload.output_text).toBe("");
+    expect(payload.output_text).toContain("The latest AI news is available.");
     expect(
       payload.output?.some((item) => item.type === "web_search_call"),
     ).toBe(true);
     expect(payload.output?.some((item) => item.type === "function_call")).toBe(
       false,
     );
-    expect(chatCalls).toBe(0);
+    // One upstream request emits the search call; the next synthesizes an
+    // answer from the hosted search results.
+    expect(chatCalls).toBe(2);
   });
 
   it("hands off timed-out hosted searches as a client search function call", async () => {
@@ -751,8 +842,8 @@ params: {"query":"help me find something"}
     expect(
       payload.output?.some((item) => item.type === "web_search_call"),
     ).toBe(true);
-    expect(payload.output_text).toBe("");
-    expect(chats).toBe(0);
+    expect(payload.output_text).toContain("Found the guide.");
+    expect(chats).toBeGreaterThan(0);
   });
 
   it("does not suppress a fresh hosted search because of a previous function result", async () => {
@@ -940,7 +1031,7 @@ params: {"query":"help me find something"}
     expect(chats).toBeGreaterThan(1);
   });
 
-  it("returns hosted search results without waiting for a synthesis turn", async () => {
+  it("continues generating after returning hosted search results", async () => {
     let chats = 0;
     upstream((url) => {
       if (url.includes("/api/chat/")) {
@@ -977,11 +1068,11 @@ params: {"query":"help me find something"}
       output_text?: string;
       output?: Array<{ type?: string }>;
     };
-    expect(payload.output_text).toBe("");
+    expect(payload.output_text).toContain("Yes. The event occurred");
     expect(
       payload.output?.some((item) => item.type === "web_search_call"),
     ).toBe(true);
-    expect(chats).toBe(0);
+    expect(chats).toBeGreaterThan(0);
   });
 
   it("renders hosted search as an Agora OpenAI Search output item", async () => {
@@ -989,11 +1080,7 @@ params: {"query":"help me find something"}
     upstream((url) => {
       if (url.includes("/api/chat/")) {
         chatCalls++;
-        return new Response(
-          chatCalls === 1
-            ? `<TOOL_CALL>\ntool: web_search\nparams: {"query":"latest AI news"}\n</TOOL_CALL>${CHAT_ID}`
-            : `The latest AI news is available.${CHAT_ID}`,
-        );
+        return new Response(`The latest AI news is available.${CHAT_ID}`);
       }
       if (url.includes("api.you.com")) {
         return Response.json({
@@ -1033,7 +1120,8 @@ params: {"query":"help me find something"}
       action: { type: "search", query: "latest AI news" },
       results: [{ url: "https://example.test/news" }],
     });
-    expect(payload.output_text).not.toContain("OpenAI web search results");
+    expect(payload.output_text).toContain("The latest AI news is available.");
+    expect(chatCalls).toBeGreaterThan(0);
   });
 
   it("uses the client-advertised search name and schema after hosted timeout", async () => {

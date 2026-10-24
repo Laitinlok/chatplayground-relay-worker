@@ -36,9 +36,7 @@ export function requiresNewPromptOnly(model: ModelEntry): boolean {
 }
 
 function latestUserMessage(messages: ChatCompletionRequest["messages"]) {
-  return [...messages]
-    .toReversed()
-    .find((message) => message.role === "user");
+  return [...messages].toReversed().find((message) => message.role === "user");
 }
 
 export function buildUpstreamRequest(
@@ -54,16 +52,35 @@ export function buildUpstreamRequest(
   // value for 'content': expected a string, got null"). Fold tool_calls and
   // tool-role results into plain text instead of dropping/nulling them.
   const promptOnly = options.promptOnly ?? requiresNewPromptOnly(model);
-  const sourceMessages = promptOnly || Boolean(req.user)
-    ? [latestUserMessage(req.messages) ?? { role: "user" as const, content: "" }]
-    : req.messages;
+  const latestUserIndex = req.messages.findLastIndex(
+    (message) => message.role === "user",
+  );
+  const hasToolResult = req.messages.some((message) => message.role === "tool");
+  // Prompt-only models still need the result of a relay-executed tool to
+  // synthesize a response. Include the current turn's user prompt and tool
+  // results in the single folded prompt, without replaying earlier turns.
+  const promptMessages =
+    promptOnly && hasToolResult
+      ? req.messages
+          .slice(Math.max(0, latestUserIndex))
+          .filter(
+            (message) => message.role === "user" || message.role === "tool",
+          )
+      : [
+          latestUserMessage(req.messages) ?? {
+            role: "user" as const,
+            content: "",
+          },
+        ];
+  const sourceMessages =
+    promptOnly || Boolean(req.user) ? promptMessages : req.messages;
   const messages: UpstreamMessage[] = sourceMessages.flatMap((msg) => {
     const role =
- msg.role === "tool"
- ? "user"
- : msg.role === "developer"
- ? "system"
- : msg.role;
+      msg.role === "tool"
+        ? "user"
+        : msg.role === "developer"
+          ? "system"
+          : msg.role;
 
     let content: UpstreamMessage["content"];
     if (msg.role === "assistant" && msg.tool_calls?.length) {
@@ -244,10 +261,7 @@ function collapseHistory(messages: UpstreamMessage[]): UpstreamMessage[] {
     const only = messages[0];
     if (!only) return [{ role: "user", content: "" }];
     const content = singleMessageContent(only);
-    if (
-      typeof content === "string" &&
-      content.startsWith("<TOOL_RESULT>")
-    ) {
+    if (typeof content === "string" && content.startsWith("<TOOL_RESULT>")) {
       return [{ role: "user", content: `Tool: ${content}` }];
     }
     return [{ role: "user", content }];
@@ -286,10 +300,12 @@ function collapseHistory(messages: UpstreamMessage[]): UpstreamMessage[] {
     textParts.length === parts.length
       ? textParts.map((part) => part.text).join("")
       : parts;
-  return [{
-    role: "user",
-    content: boundTranscript(transcript),
-  }];
+  return [
+    {
+      role: "user",
+      content: boundTranscript(transcript),
+    },
+  ];
 }
 
 /** Preserve a lone message's original payload without adding a transcript label. */

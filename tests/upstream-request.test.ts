@@ -58,6 +58,49 @@ const LMSYS_MODEL: ModelEntry = {
 const AZURE_BASE_URL = "https://app.chatplayground.ai/api/chat/azure";
 
 describe("buildUpstreamRequest — field mapping", () => {
+  it("keeps current-turn tool results when continuing an agent prompt", () => {
+    const { body } = buildUpstreamRequest(
+      {
+        model: "gpt-agent",
+        messages: [
+          {
+            role: "user",
+            content: "Find the latest release and summarize it.",
+          },
+          {
+            role: "assistant",
+            content: null,
+            tool_calls: [
+              {
+                id: "call_search",
+                type: "function",
+                function: {
+                  name: "web_search",
+                  arguments: '{"query":"latest release"}',
+                },
+              },
+            ],
+          },
+          {
+            role: "tool",
+            name: "web_search",
+            content:
+              '{"query":"latest release","results":[{"title":"Release 3.2","url":"https://example.test"}]}',
+          },
+        ],
+      },
+      AGENT_MODEL,
+    );
+
+    expect(body.messages).toHaveLength(1);
+    expect(body.messages[0]?.content).toContain(
+      "Find the latest release and summarize it.",
+    );
+    expect(body.messages[0]?.content).toContain("<TOOL_RESULT>");
+    expect(body.messages[0]?.content).toContain("Release 3.2");
+    expect(body.messages[0]?.content).not.toContain("<TOOL_CALL>");
+  });
+
   it("sends only the latest user prompt to agent models", () => {
     const { body } = buildUpstreamRequest(
       {
@@ -73,7 +116,9 @@ describe("buildUpstreamRequest — field mapping", () => {
       AGENT_MODEL,
     );
 
-    expect(body.messages).toEqual([{ role: "user", content: "Current prompt" }]);
+    expect(body.messages).toEqual([
+      { role: "user", content: "Current prompt" },
+    ]);
     expect(body.chatId).toBe("client-chat-id");
     expect(body.noSave).toBe(true);
   });
@@ -117,7 +162,9 @@ describe("buildUpstreamRequest — field mapping", () => {
       AZURE_MODEL,
     );
 
-    expect(body.messages).toEqual([{ role: "user", content: "what is an API" }]);
+    expect(body.messages).toEqual([
+      { role: "user", content: "what is an API" },
+    ]);
     expect(body.chatId).toBe("cmvjv8i7d002pl708e4uhhyyh");
   });
 
@@ -171,10 +218,15 @@ describe("buildUpstreamRequest — field mapping", () => {
     );
     expect(body.messages).toHaveLength(1);
     expect(body.messages[0]?.content).toContain("😀b");
-    expect(body.messages.some((message) => message.content.includes("�"))).toBe(false);
+    expect(
+      body.messages.some(
+        (message) =>
+          typeof message.content === "string" && message.content.includes("�"),
+      ),
+    ).toBe(false);
   });
 
- it("preserves image_url content parts for upstream vision models", () => {
+  it("preserves image_url content parts for upstream vision models", () => {
     const image = {
       type: "image_url" as const,
       image_url: { url: "https://files.example.test/uploaded-photo.png" },

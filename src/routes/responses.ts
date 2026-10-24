@@ -2,7 +2,6 @@ import { Hono } from "hono";
 import type { OpenAITool } from "../utils/tool-shim";
 import { CHAT_TIMEOUT } from "../constants/timeouts";
 import type { Env, Variables } from "../types/env";
-import type { OpenAIMessage } from "../types/openai";
 import type {
   ResponsesRequest,
   ResponsesResponse,
@@ -153,39 +152,6 @@ export function addHostedWebSearches(
     index === 0 && item.type === "web_search_call" ? calls : [item],
   );
   return { ...enriched, output };
-}
-
-function hostedSearchResponse(
-  model: string,
-  messages: OpenAIMessage[],
-  searches: readonly { query: string; results: WebSearchResult[] }[],
-  fallbackCalls: ReturnType<typeof gateToolCalls>["calls"],
-  stream: boolean | undefined,
-): Response {
-  const base = chatResultToResponses(model, "", null, messages);
-  const withSearch = addHostedWebSearches(base, searches);
-  const output = [
-    ...withSearch.output.filter((item) => item.type === "web_search_call"),
-    ...fallbackCalls.flatMap((call) => {
-      const functionCall = chatResultToResponses(
-        model,
-        "",
-        call,
-        messages,
-      ).output.find((item) => item.type === "function_call");
-      return functionCall ? [functionCall] : [];
-    }),
-  ];
-  const result = { ...withSearch, output, output_text: "" };
-  return stream
-    ? new Response(streamResponse(result, fallbackCalls[0] ?? null), {
-        headers: {
-          "content-type": "text/event-stream; charset=utf-8",
-          "cache-control": "no-cache, no-transform",
-          "x-should-retry": "false",
-        },
-      })
-    : Response.json(result, { headers: { "x-should-retry": "false" } });
 }
 
 function citationTitle(url: string): string {
@@ -1000,6 +966,31 @@ responses.post("/v1/responses", async (c) => {
         }
       }
       if (results.length === 0) {
+        // No relay provider could satisfy hosted search. Hand the same query
+        // back through the caller's advertised search tool when available.
+        const fallbackCall = createSearchToolCall(
+          query,
+          initialHostedSearchTools,
+        );
+        if (fallbackCall) {
+          const fallback = chatResultToResponses(
+            model.id,
+            "",
+            fallbackCall,
+            request.messages,
+          );
+          return raw.stream
+            ? new Response(streamResponse(fallback, fallbackCall), {
+                headers: {
+                  "content-type": "text/event-stream; charset=utf-8",
+                  "cache-control": "no-cache, no-transform",
+                  "x-should-retry": "false",
+                },
+              })
+            : Response.json(fallback, {
+                headers: { "x-should-retry": "false" },
+              });
+        }
         const unavailable = chatResultToResponses(
           model.id,
           "Web search is temporarily unavailable. Please retry the request.",
@@ -1020,13 +1011,31 @@ responses.post("/v1/responses", async (c) => {
       }
       searches.push({ query, results });
       for (const result of results) fetchedPages.set(result.url, result);
-      return hostedSearchResponse(
-        model.id,
-        request.messages,
-        searches,
-        [],
-        raw.stream,
+      request.messages.push(
+        { role: "assistant", content: null, tool_calls: [hostedCall] },
+        {
+          role: "tool",
+          name: hostedCall.function.name,
+          content: compactSearchToolResult(
+            JSON.stringify({ query, count: results.length, results }),
+            hostedCall.function.name,
+          ),
+        },
       );
+      const followUpTools = tools.filter(
+        (tool) =>
+          !hostedSearchNames.has(tool.function.name) && !isSearchTool(tool),
+      );
+      request.tools = followUpTools.length > 0 ? followUpTools : undefined;
+      request.tool_choice = followUpTools.length > 0 ? "auto" : "none";
+      if (followUpTools.length > 0) {
+        request.messages = injectToolPrompt(
+          request.messages,
+          followUpTools,
+          request.tool_choice,
+          model.endpoint === "perplexity" ? "perplexity" : undefined,
+        );
+      }
     }
   }
   let rawContent = "";
@@ -1280,14 +1289,13 @@ responses.post("/v1/responses", async (c) => {
     );
 
     for (const item of searchResults) {
-      if (item.results.length === 0 && clientSearchTools.length === 1) {
-        const fallbackCall = createSearchToolCall(
-          item.query,
-          clientSearchTools,
-        );
+      if (item.results.length === 0) {
+        const fallbackTools =
+          clientSearchTools.length === 1 ? clientSearchTools : [item.call];
+        const fallbackCall = createSearchToolCall(item.query, fallbackTools);
         if (fallbackCall) fallbackToolCalls.push(fallbackCall);
-        // A failed hosted search is handed to the caller's function; it must
-        // not be represented as a completed OpenAI-hosted search.
+        // A failed hosted search is handed back as a JSON function call; it
+        // must not be represented as a completed OpenAI search with no results.
         continue;
       }
       searches.push({ query: item.query, results: item.results });
@@ -1312,15 +1320,6 @@ responses.post("/v1/responses", async (c) => {
           item.call.function.name,
         ),
       });
-    }
-    if (searches.length > 0) {
-      return hostedSearchResponse(
-        model.id,
-        request.messages,
-        searches,
-        fallbackToolCalls,
-        raw.stream,
-      );
     }
     if (fallbackToolCalls.length > 0) {
       toolCall = fallbackToolCalls[0] ?? null;
