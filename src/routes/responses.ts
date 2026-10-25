@@ -725,19 +725,13 @@ responses.post("/v1/responses", async (c) => {
     hostedSearchNames.add("web-browsing");
     hasWebSearch = true;
   }
-  const latestUserText = [...request.messages]
-    .toReversed()
-    .reduce((found, message) => {
+  const latestUserText = [...request.messages].reverse().reduce(
+    (found, message) => {
       if (found || message.role !== "user") return found;
-      if (typeof message.content === "string") return message.content;
-      if (Array.isArray(message.content)) {
-        return message.content
-          .filter((part) => part.type === "text")
-          .map((part) => part.text ?? "")
-          .join(" ");
-      }
-      return found;
-    }, "");
+      return typeof message.content === "string" ? message.content : found;
+    },
+    "",
+  );
   const latestUserIndex = request.messages.findLastIndex(
     (message) => message.role === "user",
   );
@@ -864,7 +858,21 @@ responses.post("/v1/responses", async (c) => {
       isSearchTool(tool) &&
       tool.function.name !== "web_fetch",
   );
+  const selectedSearchTool = forcedToolName
+    ? tools.find(
+        (tool) => tool.function.name === forcedToolName && isSearchTool(tool),
+      )
+    : selectedTool
+      ? tools.find(
+          (tool) =>
+            tool.function.name === selectedTool.function.name &&
+            isSearchTool(tool),
+        )
+      : clientSearchTools.length === 1
+        ? clientSearchTools[0]
+        : null;
   const canPreflightSearch =
+    !selectedTool &&
     !isVeryBasicQuery(latestUserText) &&
     (!forcedToolName || forcedHostedSearch) &&
     initialHostedSearchTools.length === 1 &&
@@ -880,9 +888,7 @@ responses.post("/v1/responses", async (c) => {
       const configuredController = new AbortController();
       let fallbackTimer: ReturnType<typeof setTimeout> | undefined;
       let results: WebSearchResult[] = [];
-      const canClientFallback =
-        clientSearchTools.length === 1 &&
-        (!forcedToolName || forcedHostedSearch);
+      const canClientFallback = Boolean(selectedSearchTool);
       try {
         const configuredSearch = webSearch(query, {
           url: c.env.CLOUDFLARE_SEARCH_URL,
@@ -922,7 +928,10 @@ responses.post("/v1/responses", async (c) => {
       if (results.length === 0 && canClientFallback) {
         // Reuse the name and parameter schema advertised by this client.
         // Do not make another model request merely to choose a fallback tool.
-        const fallbackCall = createSearchToolCall(query, clientSearchTools);
+        const fallbackTool = selectedSearchTool ?? clientSearchTools[0];
+        const fallbackCall = fallbackTool
+          ? createSearchToolCall(query, [fallbackTool])
+          : null;
         if (fallbackCall) {
           const fallbackBase = chatResultToResponses(
             model.id,
@@ -968,10 +977,10 @@ responses.post("/v1/responses", async (c) => {
       if (results.length === 0) {
         // No relay provider could satisfy hosted search. Hand the same query
         // back through the caller's advertised search tool when available.
-        const fallbackCall = createSearchToolCall(
-          query,
-          initialHostedSearchTools,
-        );
+        const fallbackTool = selectedSearchTool ?? initialHostedSearchTools[0];
+        const fallbackCall = fallbackTool
+          ? createSearchToolCall(query, [fallbackTool])
+          : null;
         if (fallbackCall) {
           const fallback = chatResultToResponses(
             model.id,
