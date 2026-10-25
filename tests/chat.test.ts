@@ -495,39 +495,57 @@ describe("POST /v1/chat/completions — delegated search tools", () => {
     const request = JSON.parse(String(chatCall()[1].body));
     expect(JSON.stringify(request.messages)).not.toContain("## web_search");
   });
-  it("returns a web_search tool call for the client to execute", async () => {
-    const fetchMock = vi
-      .spyOn(globalThis, "fetch")
-      .mockImplementation(async (input: RequestInfo | URL) => {
-        const url = String(input);
-        if (url.endsWith("/api/models")) return Response.json(FEED);
-        return new Response(
-          `<TOOL_CALL>\ntool: web_search\nparams:\n{"query":"latest TikTok food hacks","max_results":5}\n</TOOL_CALL>${CHAT_ID}`,
-        );
+  it.each([false, true])(
+    "returns a web_search tool call for the client to execute (stream=%s)",
+    async (stream) => {
+      const fetchMock = vi
+        .spyOn(globalThis, "fetch")
+        .mockImplementation(async (input: RequestInfo | URL) => {
+          const url = String(input);
+          if (url.endsWith("/api/models")) return Response.json(FEED);
+          return new Response(
+            `<TOOL_CALL>\ntool: web_search\nparams:\n{"query":"latest TikTok food hacks","max_results":5}\n</TOOL_CALL>${CHAT_ID}`,
+          );
+        });
+
+      const res = await post({
+        ...hello,
+        stream,
+        messages: [{ role: "user", content: "Latest TikTok food hacks" }],
+        tools: [{ type: "web_search_preview" }],
       });
 
-    const res = await post({
-      ...hello,
-      messages: [{ role: "user", content: "Latest TikTok food hacks" }],
-      tools: [{ type: "web_search_preview" }],
-    });
-
-    expect(res.status).toBe(200);
-    const payload = (await res.json()) as ChatCompletionResponse;
-    expect(payload.choices[0]?.finish_reason).toBe("tool_calls");
-    expect(payload.choices[0]?.message.tool_calls?.[0]).toMatchObject({
-      function: {
-        name: "web_search",
-        arguments: JSON.stringify({
-          query: "Latest TikTok food hacks",
-        }),
-      },
-    });
-    expect(
-      fetchMock.mock.calls.filter(([url]) => String(url).includes("/api/chat/"))
-        .length,
-    ).toBe(0);
-  });
+      expect(res.status).toBe(200);
+      if (stream) {
+        const events = (await res.text())
+          .split("\n\n")
+          .filter((event) => event.startsWith("data: {"))
+          .map((event) => JSON.parse(event.slice(6)));
+        const calls = events.flatMap(
+          (event) => event.choices[0].delta.tool_calls ?? [],
+        );
+        expect(calls[0]?.function).toEqual({
+          name: "web_search",
+          arguments: '{"query":"Latest TikTok food hacks"}',
+        });
+        expect(events.at(-1).choices[0].finish_reason).toBe("tool_calls");
+      } else {
+        const payload = (await res.json()) as ChatCompletionResponse;
+        expect(payload.choices[0]?.finish_reason).toBe("tool_calls");
+        expect(payload.choices[0]?.message.tool_calls?.[0]).toMatchObject({
+          function: {
+            name: "web_search",
+            arguments: JSON.stringify({ query: "Latest TikTok food hacks" }),
+          },
+        });
+      }
+      expect(
+        fetchMock.mock.calls.filter(([url]) =>
+          String(url).includes("/api/chat/"),
+        ).length,
+      ).toBe(0);
+    },
+  );
 
   it("selects a tool on a new turn after an earlier tool result", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(

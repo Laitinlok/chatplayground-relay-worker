@@ -293,14 +293,9 @@ chat.post("/v1/chat/completions", async (c) => {
     }
     const source = new ReadableStream<Uint8Array>({
       start(controller) {
-        controller.enqueue(
+                controller.enqueue(
           new TextEncoder().encode(
-            toolGate.calls
-              .map(
-                (call) =>
-                  `<TOOL_CALL>\ntool: ${call.function.name}\nparams:\n${call.function.arguments}\n</TOOL_CALL>`,
-              )
-              .join("\n"),
+            `<TOOL_CALL>\ntool: ${selectedTool.function.name}\nparams:\n${selectedTool.function.arguments}\n</TOOL_CALL>`,
           ),
         );
         controller.close();
