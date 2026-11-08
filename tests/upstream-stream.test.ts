@@ -162,12 +162,15 @@ describe("Agora reasoning SSE compatibility", () => {
       deltas.some((delta) => delta.reasoning_content === "private reasoning"),
     ).toBe(true);
     expect(
+      deltas.some((delta) => delta.content === "public answer"),
+    ).toBe(true);
+    expect(
       deltas.some(
         (delta) =>
-          delta.content ===
-          "<think>\nprivate reasoning\n</think>\npublic answer",
+          typeof delta.content === "string" &&
+          delta.content.includes("<think>"),
       ),
-    ).toBe(true);
+    ).toBe(false);
   });
 
   it("preserves reasoning_content on the tool-aware streaming path", async () => {
@@ -185,11 +188,13 @@ describe("Agora reasoning SSE compatibility", () => {
     expect(deltas.some((delta) => delta.reasoning_content === "private")).toBe(
       true,
     );
+    expect(deltas.some((delta) => delta.content === "answer")).toBe(true);
     expect(
       deltas.some(
-        (delta) => delta.content === "<think>\nprivate\n</think>\nanswer",
+        (delta) =>
+          typeof delta.content === "string" && delta.content.includes("<think>"),
       ),
-    ).toBe(true);
+    ).toBe(false);
   });
 });
 

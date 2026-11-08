@@ -43,3 +43,19 @@ export function declinedToolUse(value: string): boolean {
     .replace(/[\u201C\u201D]/g, '"');
   return TOOL_DECLINE_RE.test(normalized);
 }
+
+
+const SEARCH_TASK_PREFIX_RE =
+  /^(?:please\s+)?(?:can you\s+|could you\s+)?(?:create|make|write|generate|build|prepare|draft|produce)\s+(?:a|an|the)?\s*(?:document|docx|word|file|report|note|summary|spreadsheet|csv|pdf)?\s*(?:file)?\s*(?:for|about|on|of|regarding)?\s*(?:the\s+)?(?:topic\s+of\s+)?/i;
+
+/** Turn a task sentence into a search query instead of echoing the whole prompt. */
+export function focusSearchQuery(value: string): string {
+  let query = sanitizeSearchQuery(value)
+    .replace(SEARCH_TASK_PREFIX_RE, "")
+    .replace(/^(?:please\s+)?(?:search(?:\s+the\s+web)?\s+(?:for|about)\s+)/i, "")
+    .replace(/\b(?:and then|then)\b[\s\S]*$/i, "")
+    .replace(/[.?!]+$/g, "")
+    .trim();
+  if (!query) query = sanitizeSearchQuery(value);
+  return query.slice(0, 180);
+}

@@ -34,6 +34,14 @@ const FEED = [
     endpoint: "lmsys",
     premiumOnly: false,
   },
+  {
+    botId: "glm-4.5",
+    modelName: "glm-4.5",
+    provider: "Zhipu",
+    group: "chat",
+    endpoint: "lmsys",
+    premiumOnly: false,
+  },
 ];
 
 function upstream(reply: (url: string) => Response) {
@@ -56,6 +64,7 @@ function app() {
 async function post(
   body: Record<string, unknown>,
   testEnv: typeof env & { CLOUDFLARE_SEARCH_URL?: string } = env,
+  extraHeaders: Record<string, string> = {},
 ) {
   return app().request(
     "/v1/responses",
@@ -64,6 +73,7 @@ async function post(
       headers: {
         "content-type": "application/json",
         authorization: `Bearer ${JWT}`,
+        ...extraHeaders,
       },
       body: JSON.stringify(body),
     },
@@ -149,6 +159,54 @@ describe("POST /v1/responses — Luna reliability", () => {
     expect(chatBodies()[0]?.maxTokens).toBe(1024);
   });
 
+  it("resumes cached Responses chats using previous_response_id", async () => {
+    const values = new Map<string, string>();
+    const CHAT_CACHE = {
+      get: vi.fn(async (key: string) => values.get(key) ?? null),
+      put: vi.fn(async (key: string, value: string) => {
+        values.set(key, value);
+      }),
+    };
+    const testEnv = { ...env, CHAT_CACHE, CF_VERSION_METADATA: { id: "v1" } };
+    upstream(() => new Response(`First answer${CHAT_ID}`));
+    const first = await post(
+      { model: "gpt-6-luna", input: "Original request" },
+      testEnv,
+    );
+    const firstResult = (await first.json()) as { id: string };
+    expect(first.status).toBe(200);
+
+    vi.mocked(fetch).mockClear();
+    upstream(() =>
+      new Response(
+        `<TOOL_CALL>\ntool: create_document\nparams: {"title":"Report"}\n</TOOL_CALL>${CHAT_ID}`,
+      ),
+    );
+    const second = await post(
+      {
+        model: "gpt-6-luna",
+        previous_response_id: firstResult.id,
+        input: "Continue the original task",
+        tools: [
+          {
+            type: "function",
+            name: "create_document",
+            parameters: {
+              type: "object",
+              properties: { title: { type: "string" } },
+            },
+          },
+        ],
+      },
+      testEnv,
+    );
+    expect(second.status).toBe(200);
+    expect(chatBodies()[0]?.chatId).toBe("clm1234567890abcdefgh");
+    expect(JSON.stringify(chatBodies()[0]?.messages)).toContain(
+      "Continue the original task",
+    );
+  });
+
   it("forces reasoning_effort none when Luna has tools", async () => {
     upstream(() => new Response(`done${CHAT_ID}`));
     const res = await post({
@@ -220,6 +278,45 @@ describe("POST /v1/responses — Luna reliability", () => {
       }
     },
   );
+
+  it("retries Responses when the model claims it lacks repository tools", async () => {
+    let chats = 0;
+    upstream(() => {
+      chats++;
+      return new Response(
+        chats === 1
+          ? "I don’t have the repository contents or a usable directory-reading result in the context provided, so I can’t reliably map the project files yet. Please provide a project tree or enable a repository listing/read tool."
+          : `<TOOL_CALL>\ntool: run_terminal_command\nparams:\n{"command":"find . -maxdepth 2 -type f"}\n</TOOL_CALL>${CHAT_ID}`,
+      );
+    });
+    const res = await post({
+      model: "gpt-6-luna",
+      input: "Map the project files",
+      tools: [{
+        type: "function",
+        name: "run_terminal_command",
+        description: "Run a shell command in the project workspace.",
+        parameters: {
+          type: "object",
+          properties: { command: { type: "string" } },
+          required: ["command"],
+        },
+      }],
+    });
+    const payload = (await res.json()) as {
+      output?: Array<{ type?: string; name?: string; arguments?: string }>;
+    };
+    expect(res.status).toBe(200);
+    expect(chats).toBe(2);
+    expect(payload.output?.[0]).toMatchObject({
+      type: "function_call",
+      name: "run_terminal_command",
+      arguments: '{"command":"find . -maxdepth 2 -type f"}',
+    });
+    const retryPrompt = JSON.stringify(chatBodies()[1]?.messages);
+    expect(retryPrompt).toContain("Map the project files");
+    expect(retryPrompt).toContain("run_terminal_command");
+  });
 
   it.each(["web_search", "web_search_preview"])(
     "falls back after 500 ms to a caller-advertised search function for %s",
@@ -696,9 +793,8 @@ describe("POST /v1/responses — Luna reliability", () => {
     expect(payload.output?.some((item) => item.type === "function_call")).toBe(
       false,
     );
-    // One upstream request emits the search call; the next synthesizes an
-    // answer from the hosted search results.
-    expect(chatCalls).toBe(2);
+    // Search result + fetch-capable history can trigger a bounded follow-up turn.
+    expect(chatCalls).toBeGreaterThanOrEqual(2);
   });
 
   it("hands off timed-out hosted searches as a client search function call", async () => {
@@ -1031,6 +1127,55 @@ describe("POST /v1/responses — Luna reliability", () => {
     expect(chats).toBeGreaterThan(1);
   });
 
+  it.each([
+    { role: "grok-4.6", model: "grok-4.6" },
+    { role: "luna", model: "gpt-6-luna" },
+  ])("keeps fetching after hosted search for $role", async ({ model }) => {
+    const chatReplies = [
+      `<TOOL_CALL>\ntool: web_search\nparams: {"query":"latest AI releases"}\n</TOOL_CALL>${CHAT_ID}`,
+      `<TOOL_CALL>\ntool: web_fetch\nparams: {"url":"https://example.test/release"}\n</TOOL_CALL>${CHAT_ID}`,
+      `Released this week: Example 2.0.${CHAT_ID}`,
+    ];
+    let chatCalls = 0;
+    upstream((url) => {
+      if (url.includes("/api/chat/")) {
+        return new Response(chatReplies[chatCalls++] ?? "unexpected extra call");
+      }
+      if (url.includes("api.you.com")) {
+        return Response.json({
+          results: [{
+            title: "Release notes",
+            url: "https://example.test/release",
+            snippet: "Example 2.0 launched this week.",
+          }],
+        });
+      }
+      return new Response("Not found", { status: 404 });
+    });
+
+    const res = await post({
+      model,
+      input: "Summarize the latest AI release",
+      tools: [
+        { type: "web_search" },
+        {
+          type: "function",
+          name: "web_fetch",
+          parameters: {
+            type: "object",
+            properties: { url: { type: "string" } },
+            required: ["url"],
+          },
+        },
+      ],
+    });
+
+    expect(res.status).toBe(200);
+    const payload = (await res.json()) as { output_text?: string };
+    expect(payload.output_text).toContain("Released this week: Example 2.0.");
+    expect(chatCalls).toBeGreaterThanOrEqual(3);
+  });
+
   it("continues generating after returning hosted search results", async () => {
     let chats = 0;
     upstream((url) => {
@@ -1266,6 +1411,111 @@ describe("POST /v1/responses — Luna reliability", () => {
     expect(
       payload.output?.some((item) => item.type === "web_search_call"),
     ).toBe(true);
+  });
+
+  
+  
+  
+  it.each(["grok-4.6", "glm-4.5"])(
+    "%s returns a direct search tool call for current-info requests",
+    async (model) => {
+    let chats = 0;
+    upstream((url) => {
+      if (url.includes("/api/chat/")) {
+        chats += 1;
+        return new Response(
+          (chats === 1
+            ? "I\u2019ll pull a few current headlines so this isn\u2019t just a roundup of trend pieces."
+            : "Recent AI work includes new model releases and agent tooling.") +
+            CHAT_ID,
+        );
+      }
+      if (url.includes("search.example.test") || url.includes("api.you.com")) {
+        return Response.json({
+          results: [
+            {
+              title: "AI news",
+              url: "https://example.test/ai",
+              snippet: "New models shipped this week.",
+              description: "New models shipped this week.",
+            },
+          ],
+        });
+      }
+      return new Response("Not found", { status: 404 });
+    });
+      const res = await post({
+        model,
+        input: "Latest AI development",
+        tools: [{ type: "web_search" }],
+  });
+      expect(res.status).toBe(200);
+      const payload = (await res.json()) as {
+        output?: Array<{ type?: string; name?: string; arguments?: string }>;
+      };
+      expect(payload.output?.[0]).toMatchObject({
+        type: "function_call",
+        name: "web_search",
+        arguments: '{"query":"Latest AI development"}',
+      });
+      expect(chatBodies()).toHaveLength(0);
+    },
+  );
+
+  it("forces hosted fetch after Grok narrates a plan instead of calling tools", async () => {
+    const chatReplies = [
+      "The search hits point to a busy stretch of model releases and product updates. I\u2019ll pull the freshest write-ups so the summary is grounded in what actually shipped." +
+        CHAT_ID,
+      "Example 2.0 shipped this week with stronger tool use." + CHAT_ID,
+    ];
+    let chatCalls = 0;
+    upstream((url) => {
+      if (url.includes("/api/chat/")) {
+        return new Response(chatReplies[chatCalls++] ?? "unexpected");
+      }
+      if (url.includes("api.you.com") || url.includes("search.example.test")) {
+        return Response.json({
+          results: [
+            {
+              title: "Release notes",
+              url: "https://example.test/release",
+              snippet: "Example 2.0 launched this week.",
+              description: "Example 2.0 launched this week.",
+            },
+          ],
+        });
+      }
+      if (url.includes("r.jina.ai")) {
+        return new Response("Example 2.0 shipped this week with stronger tool use.");
+      }
+      return new Response("Not found", { status: 404 });
+    });
+
+    const res = await post(
+      {
+        model: "grok-4.6",
+        input: "Summarize the latest AI release",
+        tools: [
+          { type: "web_search" },
+          {
+            type: "function",
+            name: "web_fetch",
+            parameters: {
+              type: "object",
+              properties: { url: { type: "string" } },
+              required: ["url"],
+            },
+          },
+        ],
+      },
+      { ...env, CLOUDFLARE_SEARCH_URL: "https://search.example.test" },
+    );
+
+    expect(res.status).toBe(200);
+    const payload = (await res.json()) as { output_text?: string };
+    expect(payload.output_text ?? "").not.toMatch(/I.?ll pull the freshest/i);
+    expect(payload.output_text ?? "").toMatch(/Example 2\.0|shipped|tool use/i);
+    expect(chatCalls).toBeGreaterThanOrEqual(2);
   });
 
   it("retries once after a plan-only reply when a tool result is present", async () => {

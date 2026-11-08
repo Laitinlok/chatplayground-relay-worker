@@ -9,7 +9,7 @@ import {
 import { collectUpstream } from "./upstream-stream";
 import { gateToolCalls, type OpenAITool } from "./tool-shim";
 
-import { needsCurrentWebSearch } from "./search-query";
+import { focusSearchQuery, needsCurrentWebSearch } from "./search-query";
 
 const SELECTOR_TIMEOUT_MS = 10_000;
 const EMBEDDING_MODEL = "@cf/baai/bge-small-en-v1.5";
@@ -167,6 +167,7 @@ export function prioritizeSearchTools(
 ): OpenAITool[] {
   if (
     hasSearchResult ||
+    tools.some((tool) => !isSearchTool(tool) && !isFetchTool(tool)) ||
     (hasExplicitUrl(_userText) &&
       /\b(?:open|read|fetch|visit|summari[sz]e)\b/i.test(_userText)) ||
     !shouldSearchWeb(_userText)
@@ -234,7 +235,9 @@ export function createSearchToolCall(
         ? "search_query"
         : null;
   if (!queryKey) return null;
-  const markup = `<TOOL_CALL>\ntool: ${search.function.name}\nparams:\n${JSON.stringify({ [queryKey]: userText })}\n</TOOL_CALL>`;
+  const query = focusSearchQuery(userText);
+  if (!query) return null;
+  const markup = `<TOOL_CALL>\ntool: ${search.function.name}\nparams:\n${JSON.stringify({ [queryKey]: query })}\n</TOOL_CALL>`;
   return gateToolCalls(markup, tools).calls[0] ?? null;
 }
 /**
@@ -261,30 +264,24 @@ export async function selectToolForAutoChoice(
   )
     return null;
   if (!request.tools?.length) return null;
-  const searchTools = request.tools.filter(isSearchTool);
-  const fetchTools = request.tools.filter(isFetchTool);
   const userText = latestUserText(request);
+  // Expose every advertised tool. Search/fetch stay preferred for live info,
+  // but document/edit/terminal tools must remain choosable by the model.
+  const candidateTools = request.tools;
+
+  const searchTools = candidateTools.filter(isSearchTool);
+  const fetchTools = candidateTools.filter(isFetchTool);
   if (
     hasExplicitUrl(userText) &&
-    /\b(?:open|read|fetch|visit|summari[sz]e)\b/i.test(userText)
+    /\b(?:open|read|fetch|visit|summari[sz]e)\b/i.test(userText) &&
+    !hasSearchResult
   )
     return null;
   const wantsWebSearch = shouldSearchWeb(userText);
+  if (!wantsWebSearch && !hasSearchResult) return null;
+  const followUpTools = candidateTools;
   const isSelectedFetchTool = (name: string) =>
     fetchTools.some((tool) => tool.function.name === name);
-  let candidateTools = request.tools;
-  if (!wantsWebSearch) {
-    // For non-web requests, use embeddings to shortlist large tool catalogs.
-    // Include every original tool in the final schema gate: the shortlist is
-    // a ranking hint, never authority to widen permissions or alter validation.
-    if (request.tools.length < 2 || request.tools.length > MAX_EMBEDDING_TOOLS)
-      return null;
-    const ranked = await rankToolsByEmbedding(userText, request.tools, env.AI);
-    if (!ranked?.confident) return null;
-    candidateTools = ranked.tools.slice(0, 5);
-  } else if (searchTools.length === 0 && fetchTools.length === 0) {
-    return null;
-  }
   const fallbackSearchCall = () =>
     createSearchToolCall(userText, request.tools ?? []);
   const directSearchCall =
@@ -293,7 +290,14 @@ export async function selectToolForAutoChoice(
     request.tool_choice === "required"
       ? createSearchToolCall(userText, request.tools)
       : null;
-  if (wantsWebSearch && directSearchCall) return directSearchCall;
+  const onlyWebTools = request.tools.every(
+    (tool) => isSearchTool(tool) || isFetchTool(tool),
+  );
+  if (!onlyWebTools) return null;
+  // Search-only catalogs still get a focused query immediately.
+  // Mixed catalogs (documents, edits, terminal, etc.) stay with the model.
+  if (wantsWebSearch && directSearchCall && !hasSearchResult && onlyWebTools)
+    return directSearchCall;
 
   // The selector protects search-first routing and uses embedding-shortlisted
   // candidates for other tool requests. It never emits an unvalidated call.
@@ -308,13 +312,16 @@ export async function selectToolForAutoChoice(
           "Return JSON only.",
           'Return {"action":"call_tool","name":"exact tool name","arguments":{...}} only when a tool is necessary.',
           'Return {"action":"answer"} when no tool is necessary.',
-          wantsWebSearch
-            ? "If a search tool and a fetch/scrape tool are available, choose the exact listed search tool first. Never substitute web_search, web_fetch, or another invented name."
+          wantsWebSearch && !hasSearchResult
+            ? "If the request needs current or external facts, choose a listed search tool first and write a focused query (topic only, not the user's full instruction). Other listed tools (documents, files, edits) stay available for later turns. Never invent tool names."
             : "Choose the most relevant listed tool only when it is necessary to fulfill the request. Otherwise return action=answer.",
-          `Search tools: ${JSON.stringify(candidateTools.filter(isSearchTool).map((tool) => tool.function.name))}`,
-          `Fetch tools: ${JSON.stringify(candidateTools.filter(isFetchTool).map((tool) => tool.function.name))}`,
+          hasSearchResult
+            ? `Prior results are in the transcript. Choose the next listed tool the task still needs (fetch a URL, create/edit a file, or search again with a distinct query). Return action=answer only when evidence is sufficient. Never narrate a plan.`
+            : "",
+          `Search tools: ${JSON.stringify(followUpTools.filter(isSearchTool).map((tool) => tool.function.name))}`,
+          `Fetch tools: ${JSON.stringify(followUpTools.filter(isFetchTool).map((tool) => tool.function.name))}`,
           `Available tools: ${JSON.stringify(
-            candidateTools.map((tool) => ({
+            followUpTools.map((tool) => ({
               name: tool.function.name,
               description: tool.function.description,
               parameters: tool.function.parameters,
@@ -322,7 +329,12 @@ export async function selectToolForAutoChoice(
           )}`,
         ].join("\n"),
       },
-      { role: "user", content: latestUserText(request) },
+      ...request.messages.slice(
+        Math.max(
+          0,
+          request.messages.findLastIndex((message) => message.role === "user"),
+        ),
+      ).filter((message) => message.role !== "system"),
     ],
   };
   try {
@@ -345,6 +357,24 @@ export async function selectToolForAutoChoice(
       name?: unknown;
       arguments?: unknown;
     };
+    // Handle action=answer before the call_tool shape check — otherwise this
+    // force-fetch path is unreachable dead code.
+    if (hasSearchResult && decision.action === "answer") {
+      const fetchTool = fetchTools[0];
+      const url = request.messages
+        .filter((message) => message.role === "tool")
+        .map((message) =>
+          String(message.content ?? "").match(/https?:\/\/[^\s"<>]+/i)?.[0],
+        )
+        .find((value): value is string => Boolean(value));
+      if (fetchTool && url) {
+        const markup = `<TOOL_CALL>\ntool: ${fetchTool.function.name}\nparams:\n${JSON.stringify({ url })}\n</TOOL_CALL>`;
+        const call = gateToolCalls(markup, request.tools).calls[0];
+        if (call) return call;
+      }
+      if (wantsWebSearch) return fallbackSearchCall();
+      return null;
+    }
     if (
       decision.action !== "call_tool" ||
       typeof decision.name !== "string" ||

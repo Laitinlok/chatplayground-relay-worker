@@ -319,7 +319,7 @@ describe("Responses adapter", () => {
       "perplexity",
     );
     expect(prompt).toContain("<TOOL_CALL>");
-    expect(prompt).toContain("You must call exactly one listed tool.");
+    expect(prompt).toContain("You must call one or more listed tools.");
     expect(prompt).toContain("edit_file");
   });
 

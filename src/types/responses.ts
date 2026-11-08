@@ -317,7 +317,8 @@ export function chatResultToResponses(
     model,
     output,
     output_text: toolCall ? "" : content,
-    ...(reasoningContent ? { reasoning_content: reasoningContent } : {}),
+    // Reasoning belongs in output[] as type:"reasoning". Do not also mirror it
+    // onto a top-level reasoning_content field — clients treat that as answer text.
     usage: {
       input_tokens,
       output_tokens,

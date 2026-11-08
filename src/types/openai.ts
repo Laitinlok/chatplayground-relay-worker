@@ -36,6 +36,9 @@ export interface ChatCompletionRequest {
   user?: string; // -> chatplayground chatId (continue same chat)
   tools?: import("../utils/tool-shim").OpenAITool[];
   tool_choice?: import("../utils/tool-shim").ToolChoice;
+  // Relay extensions: URLs returned by POST /v1/files or passed in upstream form.
+  file_ids?: string[];
+  fileUrl?: string;
   metadata?: { save?: boolean }; // → !noSave (default: noSave=true)
   // Fields accepted-and-ignored (no upstream equivalent):
   temperature?: number;

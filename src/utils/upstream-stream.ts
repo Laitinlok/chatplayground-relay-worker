@@ -3,6 +3,7 @@ import type {
   ChatCompletionChunkDelta,
 } from "../types/openai";
 import {
+  gateToolCalls,
   tryParseRelayToolCall,
   type OpenAITool,
   type ShimToolCall,
@@ -250,7 +251,7 @@ export function streamUpstreamAsOpenAI(
 
   function sse(
     delta: ChatCompletionChunkDelta,
-    finishReason: "stop" | null = null,
+    finishReason: "stop" | "tool_calls" | null = null,
   ): Uint8Array {
     const chunk: ChatCompletionChunk = {
       id: meta.id,
@@ -324,9 +325,20 @@ export function streamUpstreamAsOpenAI(
         pending += decoder.decode();
         const { content, citations, chatId } = parseTrailers(pending);
         if (chatId) meta.onChatId?.(chatId);
-        const toolCall = tryParseRelayToolCall(content, meta.tools);
-        if (toolCall) {
-          controller.enqueue(toolCallSse(toolCall));
+        const toolCalls = gateToolCalls(content, meta.tools).calls;
+        if (toolCalls.length > 0) {
+          controller.enqueue(sse({ role: "assistant" }));
+          controller.enqueue(
+            sse({
+              tool_calls: toolCalls.map((toolCall, index) => ({
+                index,
+                id: toolCall.id,
+                type: "function" as const,
+                function: toolCall.function,
+              })),
+            }),
+          );
+          controller.enqueue(sse({}, "tool_calls"));
           controller.enqueue(encoder.encode("data: [DONE]\n\n"));
           controller.close();
           return;
@@ -343,12 +355,9 @@ export function streamUpstreamAsOpenAI(
           searchUrl: meta.searchUrl,
           searchToken: meta.searchToken,
         });
-        const answer =
-          (split.reasoningContent && split.content
-            ? `<think>\n${split.reasoningContent}\n</think>\n`
-            : "") +
-          visibleContent +
-          formatCitations(citations, titles);
+        // Keep reasoning on the dedicated channel only. Re-embedding <think>
+        // tags into content makes Grok/Luna "thinking" appear as the answer.
+        const answer = visibleContent + formatCitations(citations, titles);
         if (answer) controller.enqueue(sse({ content: answer }));
 
         controller.enqueue(sse({}, "stop"));
@@ -418,22 +427,20 @@ export function streamUpstreamWithToolShim(
         const { content, chatId, citations } = parseTrailers(buf);
         if (chatId) meta.onChatId?.(chatId);
 
-        const toolCall = tryParseRelayToolCall(content, meta.tools);
+        const toolCalls = gateToolCalls(content, meta.tools).calls;
 
-        if (toolCall) {
+        if (toolCalls.length > 0) {
           // Tool-only streaming turns should not send an empty content delta:
           // some OpenAI-compatible clients treat it as a completed blank reply.
           controller.enqueue(sse({ role: "assistant" }));
           controller.enqueue(
             sse({
-              tool_calls: [
-                {
-                  index: 0,
-                  id: toolCall.id,
-                  type: "function",
-                  function: toolCall.function,
-                },
-              ],
+              tool_calls: toolCalls.map((toolCall, index) => ({
+                index,
+                id: toolCall.id,
+                type: "function" as const,
+                function: toolCall.function,
+              })),
             }),
           );
           controller.enqueue(sse({}, "tool_calls"));
@@ -450,12 +457,9 @@ export function streamUpstreamWithToolShim(
             searchUrl: meta.searchUrl,
             searchToken: meta.searchToken,
           });
-          const answer =
-            (split.reasoningContent && split.content
-              ? `<think>\n${split.reasoningContent}\n</think>\n`
-              : "") +
-            visibleContent +
-            formatCitations(citations, titles);
+          // Keep reasoning on the dedicated channel only. Re-embedding <think>
+          // tags into content makes Grok/Luna "thinking" appear as the answer.
+          const answer = visibleContent + formatCitations(citations, titles);
           if (answer) controller.enqueue(sse({ content: answer }));
           controller.enqueue(sse({}, "stop"));
         }

@@ -8,8 +8,11 @@ import type {
   UpstreamMessage,
 } from "../types/upstream";
 import { compactSearchToolResult } from "./search-tool-context";
+import { buildToolSystemPrompt } from "./tool-shim";
+import type { OpenAITool } from "./tool-shim";
 
-const MAX_UPSTREAM_MESSAGE_CHARS = 15_000;
+// Leave headroom for upstream-side normalization and Unicode length counting.
+const MAX_UPSTREAM_MESSAGE_CHARS = 12_000;
 const OMITTED_CONTEXT = "…(earlier context omitted)\n";
 
 function flattenContent(content: unknown): string {
@@ -23,26 +26,63 @@ function flattenContent(content: unknown): string {
   return "";
 }
 
+export function formatHistoryText(messages: ChatCompletionRequest["messages"]): string {
+  return messages
+    .filter(
+      (message) =>
+        message.role === "user" ||
+        message.role === "assistant" ||
+        message.role === "tool",
+    )
+    .map((message) => {
+      const content = flattenContent(message.content).trim();
+      const calls = message.tool_calls?.map((call) =>
+        `Tool call ${call.function.name}: ${call.function.arguments}`,
+      );
+      const label =
+        message.role === "user"
+          ? "USER"
+          : message.role === "tool"
+            ? "TOOL_RESULT"
+            : "RESPONSE";
+      return [
+        `<${label}>`,
+        content,
+        ...(calls ?? []),
+        `</${label}>`,
+      ].join("\n");
+    })
+    .join("\n\n");
+}
+
+export function formatToolsText(tools: OpenAITool[]): string {
+  return JSON.stringify(
+    tools.map((tool) => ({
+      name: tool.function.name,
+      description: tool.function.description ?? "",
+      parameters: tool.function.parameters ?? {},
+    })),
+    null,
+    2,
+  );
+}
+
 export interface BuiltUpstreamRequest {
   endpoint: UpstreamEndpoint;
   body: UpstreamChatRequest;
 }
 
-/** Agent endpoints reject transcripts and accept only the current prompt. */
-export function requiresNewPromptOnly(model: ModelEntry): boolean {
-  return /\b(?:agent|grok)\b/i.test(
-    `${model.id} ${model.modelName} ${model.upstreamModel} ${model.upstreamBotId}`,
-  );
-}
-
-function latestUserMessage(messages: ChatCompletionRequest["messages"]) {
-  return [...messages].toReversed().find((message) => message.role === "user");
-}
-
 export function buildUpstreamRequest(
   req: ChatCompletionRequest,
   model: ModelEntry,
-  options: { promptOnly?: boolean } = {},
+  options: {
+    chatId?: string;
+    fileUrls?: string[];
+    currentTurnOnly?: boolean;
+    contextFilesOnly?: boolean;
+    promptOnly?: boolean;
+    preserveRoles?: boolean;
+  } = {},
 ): BuiltUpstreamRequest {
   // Preserve multimodal parts when possible and normalize roles unsupported by
   // chatplayground before folding the transcript into a single user message.
@@ -51,29 +91,91 @@ export function buildUpstreamRequest(
   // upstream Azure/perplexity/lmsys endpoints reject outright ("400 Invalid
   // value for 'content': expected a string, got null"). Fold tool_calls and
   // tool-role results into plain text instead of dropping/nulling them.
-  const promptOnly = options.promptOnly ?? requiresNewPromptOnly(model);
-  const latestUserIndex = req.messages.findLastIndex(
+  const lastAssistantTurn = req.messages.findLastIndex(
+    (message) => message.role === "assistant",
+  );
+  const lastToolResult = req.messages.findLastIndex(
+    (message) => message.role === "tool",
+  );
+  const lastUserTurn = req.messages.findLastIndex(
     (message) => message.role === "user",
   );
-  const hasToolResult = req.messages.some((message) => message.role === "tool");
-  // Prompt-only models still need the result of a relay-executed tool to
-  // synthesize a response. Include the current turn's user prompt and tool
-  // results in the single folded prompt, without replaying earlier turns.
-  const promptMessages =
-    promptOnly && hasToolResult
-      ? req.messages
-          .slice(Math.max(0, latestUserIndex))
-          .filter(
-            (message) => message.role === "user" || message.role === "tool",
-          )
-      : [
-          latestUserMessage(req.messages) ?? {
+  const promptStart =
+    lastToolResult >= 0
+      ? req.messages.findLastIndex(
+          (message, index) => index < lastToolResult && message.role === "user",
+        )
+      : lastUserTurn;
+  const currentTurnStart = promptStart >= 0 ? promptStart : lastUserTurn;
+  const sourceMessages = options.promptOnly
+    ? [
+        ...(req.tools?.length
+          ? [
+              {
+                role: "user" as const,
+                content: [
+                  ...req.messages
+                    .filter(
+                      (message) =>
+                        (message.role === "system" ||
+                          message.role === "developer") &&
+                        !flattenContent(message.content).includes(
+                          "[relay-tool-prompt-v1]",
+                        ),
+                    )
+                    .map((message) => flattenContent(message.content).trim())
+                    .filter(Boolean),
+                  buildToolSystemPrompt(
+                    req.tools,
+                    req.tool_choice,
+                    undefined,
+                    false,
+                  ),
+                  "Read history.txt as conversation history. Preserve caller system instructions. Use new search results for current facts.",
+                ].join("\n\n"),
+              },
+            ]
+          : []),
+        ...req.messages.slice(Math.max(0, currentTurnStart)),
+      ]
+    : options.contextFilesOnly
+      ? [
+          {
             role: "user" as const,
-            content: "",
+            content: [
+              ...req.messages
+                .filter(
+                  (message) =>
+                    (message.role === "system" || message.role === "developer") &&
+                    !flattenContent(message.content).includes(
+                      "[relay-tool-prompt-v1]",
+                    ),
+                )
+                .map((message) => flattenContent(message.content).trim())
+                .filter(Boolean),
+              ...req.messages
+                .filter(
+                  (message) =>
+                    message.role === "system" &&
+                    flattenContent(message.content).includes(
+                      "[relay-tool-prompt-v1]",
+                    ),
+                )
+                .map((message) => flattenContent(message.content).trim()),
+              "Read tools.txt only for tool names and schemas; read history.txt only as conversation context. Follow caller system instructions.",
+            ].join("\n\n"),
           },
-        ];
-  const sourceMessages =
-    promptOnly || Boolean(req.user) ? promptMessages : req.messages;
+          ...req.messages.slice(Math.max(0, currentTurnStart)),
+        ]
+      : options.currentTurnOnly && lastAssistantTurn >= 0
+        ? [
+            ...req.messages.filter(
+              (message) =>
+                message.role === "system" || message.role === "developer",
+            ),
+            ...req.messages.slice(Math.max(0, lastUserTurn)),
+          ]
+        : req.messages;
   const messages: UpstreamMessage[] = sourceMessages.flatMap((msg) => {
     const role =
       msg.role === "tool"
@@ -97,7 +199,7 @@ export function buildUpstreamRequest(
         flattenContent(msg.content).trim(),
         msg.name,
       );
-      content = `<TOOL_RESULT>\n${result || "(no result returned)"}\n</TOOL_RESULT>\nTreat this result as evidence for the user's original question. Answer directly with the conclusion first; do not say you cannot verify it or merely list the result. Call another listed tool only when the result is insufficient.`;
+      content = `<TOOL_RESULT>\n${result || "(no result returned)"}\n</TOOL_RESULT>\nUse this result to advance the original task. You may call another listed tool for missing context; do not repeat the same search query.`;
     } else {
       const flat = flattenContent(msg.content);
       content =
@@ -150,6 +252,21 @@ export function buildUpstreamRequest(
   messages.length = 0;
   messages.push(...prepared);
 
+  const hasToolResult = req.messages.some((message) => message.role === "tool");
+  const hasCallerPromptInTranscript = req.messages.some(
+    (message) =>
+      (message.role === "system" || message.role === "developer") &&
+      !flattenContent(message.content).includes("[relay-tool-prompt-v1]"),
+  );
+  const callerInstructions = req.messages
+    .filter(
+      (message) =>
+        (message.role === "system" || message.role === "developer") &&
+        !flattenContent(message.content).includes("[relay-tool-prompt-v1]"),
+    )
+    .map((message) => flattenContent(message.content).trim())
+    .filter(Boolean)
+    .join("\n\n");
   // Tool prompting via injectToolPrompt() (chat.ts) only covers "should I
   // call a tool," not "I already have a tool result, now answer." Models
   // observed mimicking the injected "I called X tool with arguments Y"
@@ -158,8 +275,7 @@ export function buildUpstreamRequest(
   // REGARDLESS of whether `tools` is present on this request — compliant
   // clients resend `tools` on every turn, so gating on its absence almost
   // never actually fires in real traffic.
-  const hasToolResultInHistory =
-    !promptOnly && req.messages.some((m) => m.role === "tool");
+  const hasToolResultInHistory = hasToolResult && !options.promptOnly;
   if (hasToolResultInHistory) {
     const canCallAnotherTool =
       Boolean(req.tools?.length) && req.tool_choice !== "none";
@@ -171,21 +287,27 @@ export function buildUpstreamRequest(
       role: "system",
       content: canCallAnotherTool
         ? hasEditTool
-          ? "A <TOOL_RESULT> is above. Continue the user's task. If an edit/write/replace tool is still needed, emit the next <TOOL_CALL> now. Otherwise answer from the results."
-          : "Answer from every <TOOL_RESULT> above. Emit another <TOOL_CALL> only if more information is required."
+          ? "A <TOOL_RESULT> is above. Continue the user's task. If another tool is still needed (edit/write/replace/create/search/fetch/terminal), emit one or more <TOOL_CALL> XML blocks now — never Markdown JSON, never a prose plan. Do not repeat an identical search query. Otherwise answer from the results."
+          : "Use every <TOOL_RESULT>. If more evidence or actions are needed, emit <TOOL_CALL> XML for listed tools (including web_search/web_fetch/create tools); never Markdown JSON and don't repeat an identical search query. Otherwise answer."
         : "You stopped calling tools. Answer the user's question from every <TOOL_RESULT> above. Do not announce another search.",
     });
+    if (callerInstructions && !hasCallerPromptInTranscript) {
+      messages.push({
+        role: options.promptOnly || options.contextFilesOnly ? "user" : "system",
+        content: `Caller instructions (highest priority; continue to follow them):\n${callerInstructions}`,
+      });
+    }
   }
 
   // Hard checks last, after the result note. Upstream rejects an
   // assistant-final turn and an empty message list.
   const last = messages.at(-1);
-  if (last?.role === "assistant") {
+  if (!options.promptOnly && last?.role === "assistant") {
     const canCallAnotherTool = Boolean(req.tools?.length);
     messages.push({
       role: "user",
       content: canCallAnotherTool
-        ? "Continue. If another listed tool is needed to finish the task, emit a <TOOL_CALL> now; otherwise answer."
+        ? "Continue. If another listed tool is needed to finish the task, emit <TOOL_CALL> XML now (no JSON fence); otherwise answer."
         : "Continue.",
     });
   }
@@ -193,11 +315,19 @@ export function buildUpstreamRequest(
     messages.push({ role: "user", content: "Hello." });
   }
 
-  // chatplayground accepts only one new prompt and relies on chatId for
-  // server-side history. This relay stays stateless by folding the OpenAI
-  // transcript into one role-labelled user message after local tool and draft
-  // handling have preserved their context.
-  const upstreamMessages = collapseHistory(messages);
+  // Upstream accepts one message; fold the transcript in caller order.
+  const upstreamMessages =
+    options.preserveRoles && !options.promptOnly
+      ? messages
+          .filter(
+            (message) =>
+              message.role === "system" || message.role === "user",
+          )
+          .map((message) => ({
+            ...message,
+            content: boundTranscript(message.content),
+          }))
+      : collapseHistory(messages);
 
   // OpenAI `metadata.save` extension → !noSave. Default: don't pollute the
   // caller's chatplayground history with API traffic (noSave=true).
@@ -206,16 +336,14 @@ export function buildUpstreamRequest(
   // Fields shared by all three endpoints.
   const base = {
     messages: upstreamMessages,
-    // Prompt-only agents resume context by chatId; only their messages array
-    // is restricted to the current user prompt.
-    chatId: req.user ?? "", // OpenAI `user` → chatplayground `chatId`
+    // Resume only from a chat ID cached for this relay conversation.
+    chatId: options.chatId ?? "",
     isRegenerate: false,
     promptTemplate: null,
-    fileUrl: null,
+    fileUrl: options.fileUrls?.slice(0, 6).join("|||") ?? null,
     botId: model.upstreamBotId,
     submissionId: crypto.randomUUID(),
-    // Keep upstream chats unsaved by default. The relay separately caches the
-    // returned chatId so follow-up turns can resume without replaying history.
+    // Keep upstream chats unsaved; each request includes its own transcript.
     noSave: !save,
     ...(req.reasoning_effort ? { reasoning_effort: req.reasoning_effort } : {}),
     ...(req.verbosity ? { verbosity: req.verbosity } : {}),
@@ -278,7 +406,26 @@ function collapseHistory(messages: UpstreamMessage[]): UpstreamMessage[] {
   }
 
   const parts: UpstreamContentPart[] = [];
-  for (const [index, message] of transcriptMessages.entries()) {
+  const lastUserIndex = transcriptMessages.findLastIndex(
+    (message) =>
+      message.role === "user" &&
+      !(typeof message.content === "string" &&
+        message.content.startsWith("<TOOL_RESULT>")),
+  );
+  const toolPromptIndex = transcriptMessages.findIndex(
+    (message) =>
+      message.role === "system" &&
+      typeof message.content === "string" &&
+      message.content.includes("[relay-tool-prompt-v1]"),
+  );
+  const orderedMessages =
+    toolPromptIndex >= 0 && lastUserIndex >= 0
+      ? [
+          transcriptMessages[lastUserIndex]!,
+          ...transcriptMessages.filter((_, index) => index !== lastUserIndex),
+        ]
+      : transcriptMessages;
+  for (const [index, message] of orderedMessages.entries()) {
     if (index > 0) parts.push({ type: "text", text: "\n\n" });
     const label =
       message.role === "user" &&
@@ -319,6 +466,36 @@ function singleMessageContent(
 }
 
 /** Keep the newest context within the upstream per-message size limit. */
+const TOOL_POLICY_MARK = "=== TOOL POLICY ===";
+const TOOL_POLICY_END_MARK = "</AVAILABLE_TOOLS>";
+
+/** Keep system/tool definitions intact; trim only older conversation history. */
+function preserveToolPolicy(content: string, bounded: string): string {
+  const mark = content.indexOf(TOOL_POLICY_MARK);
+  if (mark < 0) return bounded;
+  const userStart = content.lastIndexOf("\n\nUser: ");
+  if (userStart < 0) return bounded;
+  const latestUser = content.slice(userStart + 2);
+  const end = content.indexOf(TOOL_POLICY_END_MARK, mark);
+  const policyEnd =
+    end < 0 ? content.length : end + TOOL_POLICY_END_MARK.length;
+  const systemPrefix = content.slice(0, mark).trim();
+  const policy = content.slice(mark, policyEnd);
+  const protectedPrompt = [systemPrefix, policy].filter(Boolean).join("\n\n");
+  const preservedUser = latestUser.slice(
+    -Math.floor(MAX_UPSTREAM_MESSAGE_CHARS / 2),
+  );
+  const availablePrompt = Math.max(
+    0,
+    MAX_UPSTREAM_MESSAGE_CHARS -
+      preservedUser.length -
+      OMITTED_CONTEXT.length -
+      4,
+  );
+  const prompt = protectedPrompt.slice(0, availablePrompt);
+  return `${preservedUser}\n\n${OMITTED_CONTEXT}${prompt}`;
+}
+
 function boundTranscript(
   content: string | UpstreamContentPart[],
 ): string | UpstreamContentPart[] {
@@ -328,7 +505,7 @@ function boundTranscript(
       content.length - (MAX_UPSTREAM_MESSAGE_CHARS - OMITTED_CONTEXT.length);
     const firstCode = content.charCodeAt(start);
     if (firstCode >= 0xdc00 && firstCode <= 0xdfff) start++;
-    return `${OMITTED_CONTEXT}${content.slice(start)}`;
+    return preserveToolPolicy(content, `${OMITTED_CONTEXT}${content.slice(start)}`);
   }
 
   let remaining = MAX_UPSTREAM_MESSAGE_CHARS - OMITTED_CONTEXT.length;

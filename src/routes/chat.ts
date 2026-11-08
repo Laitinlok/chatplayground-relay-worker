@@ -14,7 +14,7 @@ import {
   buildUpstreamHeaders,
   buildUpstreamRequest,
   endpointUrl,
-  requiresNewPromptOnly,
+  formatToolsText,
 } from "../utils/upstream-request";
 import {
   collectUpstream,
@@ -32,22 +32,26 @@ import {
   stripToolCallMarkup,
   rejectedToolCallStub,
   toolCallRetrySignal,
+  missingToolCallRetrySignal,
+  looksLikeNonXmlToolAttempt,
   tryParseRelayToolCall,
 } from "../utils/tool-shim";
-import { declinedToolUse } from "../utils/search-query";
-import { bridgeInlineImages } from "../utils/image-bridge";
+import { declinedToolUse, needsCurrentWebSearch } from "../utils/search-query";
+import { bridgeInlineImages, uploadTextAttachment } from "../utils/image-bridge";
+import { formatHistoryText } from "../utils/upstream-request";
 import {
+  isFetchTool,
   isSearchTool,
   isVeryBasicQuery,
   prioritizeSearchTools,
+  createSearchToolCall,
   selectToolForAutoChoice,
 } from "../utils/tool-selector";
 import { resolveCitationTitles } from "../utils/citation-titles";
 import { resolveReasoningEffort } from "../utils/reasoning-prefill";
+import { CHAT_CACHE_TTL_SECONDS, chatCacheKey } from "../utils/chat-cache";
 
 const chat = new Hono<{ Bindings: Env; Variables: Variables }>();
-
-const CHAT_CACHE_TTL_SECONDS = 60 * 60; // 1 hour
 
 function latestUserText(messages: OpenAIMessage[]): string {
   const latestUser = [...messages]
@@ -93,40 +97,6 @@ function logRequestShape(body: ChatCompletionRequest): void {
   );
 }
 
-async function chatCacheKey(
-  sessionToken: string,
-  modelId: string,
-  deploymentVersion: string,
-  conversationId?: string,
-): Promise<string> {
-  const digest = await crypto.subtle.digest(
-    "SHA-256",
-    new TextEncoder().encode(sessionToken),
-  );
-  const sessionHash = Array.from(new Uint8Array(digest), (byte) =>
-    byte.toString(16).padStart(2, "0"),
-  ).join("");
-  const hourBucket = Math.floor(Date.now() / (60 * 60 * 1000));
-
-  return `chat:${deploymentVersion}:${hourBucket}:${conversationId ?? `${sessionHash}:${modelId}`}`;
-}
-
-async function loadCachedChatId(env: Env, key: string): Promise<string | null> {
-  if (!env.CHAT_CACHE) return null;
-  return env.CHAT_CACHE.get(key);
-}
-
-async function saveCachedChatId(
-  env: Env,
-  key: string,
-  chatId: string,
-): Promise<void> {
-  if (!env.CHAT_CACHE) return;
-  await env.CHAT_CACHE.put(key, chatId, {
-    expirationTtl: CHAT_CACHE_TTL_SECONDS,
-  });
-}
-
 chat.post("/v1/chat/completions", async (c) => {
   const body = (await c.req
     .json()
@@ -148,28 +118,21 @@ chat.post("/v1/chat/completions", async (c) => {
   const model = findModel(body.model, registry);
   if (!model) throw modelNotFound(body.model);
   const isLuna = model.modelName.toLowerCase().includes("luna");
-  const promptOnlyAgent = requiresNewPromptOnly(model);
+  const promptOnly = /(?:grok|glm)/i.test(model.modelName);
   const sessionToken = await c.get("sessionToken")();
   await bridgeInlineImages(body.messages, c.env, sessionToken);
-
-  // Reuse a prior upstream chat when the client hasn't explicitly set `user`
-  // and there's a cached chatId for this conversation. This avoids spending
-  // a brand-new chatplayground chat (and quota) on every single request.
-  const conversationId = c.req.header("x-conversation-id") ?? undefined;
-  const deploymentVersion = c.env.CF_VERSION_METADATA?.id ?? "local";
+  const conversationId = c.req.header("x-conversation-id");
   const cacheKey = await chatCacheKey(
     sessionToken,
     model.id,
-    deploymentVersion,
-    conversationId,
+    c.env.CF_VERSION_METADATA?.id ?? "local",
+    conversationId ?? body.user,
   );
-
-  if (!promptOnlyAgent && !body.user) {
-    const cachedChatId = await loadCachedChatId(c.env, cacheKey);
-    if (cachedChatId) {
-      body.user = cachedChatId;
-    }
-  }
+  const hasHistory = body.messages.length > 1;
+  const cachedChatId =
+    hasHistory && c.env.CHAT_CACHE
+      ? await c.env.CHAT_CACHE.get(cacheKey)
+      : null;
 
   // Luna omits reasoning_effort from most clients. Default it to medium so
   // the tool-selection draft runs; an explicit "none" still disables it.
@@ -190,10 +153,14 @@ chat.post("/v1/chat/completions", async (c) => {
   }
 
   const requestedTools = normalizeOpenAITools(body.tools);
-  const hasToolResult = originalMessages.some(
+  const latestUserIndex = originalMessages.findLastIndex(
+    (message) => message.role === "user",
+  );
+  const currentTurnMessages = originalMessages.slice(latestUserIndex + 1);
+  const hasToolResult = currentTurnMessages.some(
     (message) => message.role === "tool",
   );
-  const hasRelaySearchResult = originalMessages.some((message) => {
+  const hasRelaySearchResult = currentTurnMessages.some((message) => {
     if (message.role !== "tool") return false;
     if (
       typeof message.name === "string" &&
@@ -218,6 +185,7 @@ chat.post("/v1/chat/completions", async (c) => {
   });
   const userText = latestUserText(body.messages);
   if (
+    !promptOnly &&
     isVeryBasicQuery(userText) &&
     (body.tool_choice === undefined || body.tool_choice === "auto")
   ) {
@@ -242,35 +210,52 @@ chat.post("/v1/chat/completions", async (c) => {
     // search-first gate. Let the selector route this turn to discovery.
     body.tool_choice = "auto";
   }
+  const catalogIsWebOnly = toolsForModel.every(
+    (tool) => isSearchTool(tool) || isFetchTool(tool),
+  );
   let selectedTool: ReturnType<typeof tryParseRelayToolCall> = null;
+  const hasPriorUserTurn = originalMessages
+    .slice(0, latestUserIndex)
+    .some((message) => message.role === "user");
   if (toolsRequested) {
     body.tools = toolsForModel;
-    selectedTool = isVeryBasicQuery(userText)
-      ? null
-      : await selectToolForAutoChoice(
-          body,
-          model,
-          c.env,
-          sessionToken,
-          hasRelaySearchResult,
-        );
-    if (selectedTool) {
+    selectedTool =
+      !hasRelaySearchResult &&
+      (promptOnly
+        ? needsCurrentWebSearch(userText)
+        : isSearchTool(toolsForModel[0]!) && needsCurrentWebSearch(userText))
+        ? createSearchToolCall(userText, toolsForModel)
+        : !hasPriorUserTurn || isVeryBasicQuery(userText) || !catalogIsWebOnly
+          ? null
+          : await selectToolForAutoChoice(
+              body,
+              model,
+              c.env,
+              sessionToken,
+              hasRelaySearchResult,
+            );
+    // Pin a single tool only for search/fetch catalogs. Mixed catalogs
+    // (documents, edits, terminal) stay on auto so the model can choose.
+    if (selectedTool && catalogIsWebOnly) {
       body.tool_choice = {
         type: "function",
         function: { name: selectedTool.function.name },
       };
+    } else if (selectedTool) {
+      body.tool_choice = body.tool_choice ?? "auto";
     }
     body.messages = injectToolPrompt(
       body.messages,
       toolsForModel,
       body.tool_choice,
       model.endpoint === "perplexity" ? "perplexity" : undefined,
+      false,
     );
   }
 
   const id = `chatcmpl-${crypto.randomUUID()}`;
   const created = Math.floor(Date.now() / 1000);
-  if (selectedTool) {
+  if (selectedTool && catalogIsWebOnly) {
     if (!body.stream) {
       return Response.json({
         id,
@@ -317,12 +302,97 @@ chat.post("/v1/chat/completions", async (c) => {
     );
   }
 
+  const maxUserFiles = toolsRequested || hasPriorUserTurn ? 4 : 6;
+  const rawFileUrls = body.file_ids ?? body.fileUrl?.split("|||") ?? [];
+  if (!Array.isArray(rawFileUrls)) {
+    throw invalidRequest("file_ids must be an array of HTTPS file URLs.", "file_ids");
+  }
+  const userFileUrls = rawFileUrls;
+  if (
+    userFileUrls.length > maxUserFiles ||
+    userFileUrls.some((url) => {
+      if (typeof url !== "string") return true;
+      try {
+        return new URL(url).protocol !== "https:";
+      } catch {
+        return true;
+      }
+    })
+  ) {
+    throw invalidRequest(
+      `file_ids must contain at most ${maxUserFiles} HTTPS file URLs.`,
+      "file_ids",
+    );
+  }
+  let preparatoryChatId: string | undefined;
+  if (toolsRequested && !hasPriorUserTurn && !promptOnly) {
+    const callerSystem = originalMessages
+      .filter((message) => message.role === "system" || message.role === "developer")
+      .map((message) => typeof message.content === "string" ? message.content : "")
+      .filter(Boolean)
+      .join("\n\n");
+    const setupMessages = injectToolPrompt(
+      callerSystem ? [{ role: "system", content: callerSystem }] : [],
+      toolsForModel,
+      body.tool_choice,
+      model.endpoint === "perplexity" ? "perplexity" : undefined,
+      true,
+    );
+    const setup = buildUpstreamRequest(
+      { ...body, messages: setupMessages },
+      model,
+    );
+    const setupResponse = await fetch(
+      endpointUrl(setup.endpoint, c.env.UPSTREAM_CHAT_URL),
+      {
+        method: "POST",
+        headers: buildUpstreamHeaders(sessionToken, c.env),
+        body: JSON.stringify(setup.body),
+        signal: AbortSignal.timeout(CHAT_TIMEOUT),
+      },
+    );
+    if (!setupResponse.ok || !setupResponse.body) {
+      const detail = (await setupResponse.text().catch(() => "")).trim();
+      throw upstreamError(
+        setupResponse.status,
+        detail ? `Tool setup failed: ${detail.slice(0, 200)}` : "Tool setup turn failed.",
+      );
+    }
+    // Discard the setup acknowledgement; only its upstream chat ID is reused.
+    preparatoryChatId =
+      (await collectUpstream(setupResponse.body)).chatId ?? undefined;
+  }
+
+  const contextFileUrls = toolsRequested && !promptOnly
+    ? await Promise.all([
+        uploadTextAttachment(
+          formatToolsText(toolsForModel),
+          "tools.txt",
+          c.env,
+          sessionToken,
+        ),
+        uploadTextAttachment(
+          formatHistoryText(originalMessages),
+          "history.txt",
+          c.env,
+          sessionToken,
+        ),
+      ])
+    : [];
+  const fileUrls = [...userFileUrls, ...contextFileUrls];
+
   let rawContent = "";
   let citations: readonly string[] = [];
   let chatId: string | null = null;
   let toolCall: ReturnType<typeof tryParseRelayToolCall> = null;
 
-  const built = buildUpstreamRequest(body, model);
+  const built = buildUpstreamRequest(body, model, {
+    chatId: promptOnly ? undefined : preparatoryChatId ?? cachedChatId ?? undefined,
+    fileUrls,
+    contextFilesOnly: toolsRequested && !promptOnly,
+    promptOnly,
+    preserveRoles: model.endpoint === "perplexity" || model.endpoint === "lmsys",
+  });
   const upstream = await fetch(
     endpointUrl(built.endpoint, c.env.UPSTREAM_CHAT_URL),
     {
@@ -347,8 +417,11 @@ chat.post("/v1/chat/completions", async (c) => {
   rawContent = parsed.content;
   citations = parsed.citations;
   chatId = parsed.chatId;
-  if (chatId && !promptOnlyAgent)
-    await saveCachedChatId(c.env, cacheKey, chatId);
+  if (chatId) {
+    await c.env.CHAT_CACHE?.put(cacheKey, chatId, {
+      expirationTtl: CHAT_CACHE_TTL_SECONDS,
+    });
+  }
   let toolGate = toolsRequested
     ? gateToolCalls(rawContent, body.tools)
     : { calls: [], rejections: [] as string[] };
@@ -358,17 +431,46 @@ chat.post("/v1/chat/completions", async (c) => {
   // rejection reasons so the model can emit a corrected <TOOL_CALL>.
   // If we already have at least one valid call, forward it immediately —
   // an extra upstream round-trip here is what makes Agora show "retry 1/5".
-  if (
+  const toolChoiceRequiresCall =
+    body.tool_choice === "required" ||
+    (typeof body.tool_choice === "object" && "function" in body.tool_choice);
+  const shouldRetryMissingTool =
     toolsRequested &&
-    toolGate.rejections.length > 0 &&
-    toolGate.calls.length === 0
-  ) {
+    toolGate.calls.length === 0 &&
+    (toolGate.rejections.length > 0 ||
+      toolChoiceRequiresCall ||
+      (hasToolResult && looksLikeNonXmlToolAttempt(rawContent)) ||
+      (!hasToolResult &&
+        (needsCurrentWebSearch(userText) || !catalogIsWebOnly) &&
+        (looksLikeNonXmlToolAttempt(rawContent) ||
+          /\b(?:not available|cannot|can['’]t|unable to|don['’]t have access)\b/i.test(rawContent))));
+  if (shouldRetryMissingTool) {
+    const retryUser = [
+      userText,
+      toolGate.rejections.length > 0
+        ? toolCallRetrySignal(toolGate.rejections)
+        : missingToolCallRetrySignal(body.tools ?? []),
+    ]
+      .filter(Boolean)
+      .join("\n\n");
     body.messages = [
       ...body.messages,
-      { role: "assistant", content: rejectedToolCallStub(toolGate.rejections) },
-      { role: "user", content: toolCallRetrySignal(toolGate.rejections) },
+      {
+        role: "assistant",
+        content:
+          toolGate.rejections.length > 0
+            ? rejectedToolCallStub(toolGate.rejections)
+            : stripToolCallMarkup(rawContent) || "Skipped required tool call.",
+      },
+      { role: "user", content: retryUser },
     ];
-    const gateBuilt = buildUpstreamRequest(body, model);
+    const gateBuilt = buildUpstreamRequest(body, model, {
+      chatId: promptOnly ? undefined : chatId ?? cachedChatId ?? undefined,
+      fileUrls,
+      contextFilesOnly: toolsRequested && !promptOnly,
+      promptOnly,
+      preserveRoles: model.endpoint === "perplexity" || model.endpoint === "lmsys",
+    });
     const gateRetry = await fetch(
       endpointUrl(gateBuilt.endpoint, c.env.UPSTREAM_CHAT_URL),
       {
@@ -381,14 +483,22 @@ chat.post("/v1/chat/completions", async (c) => {
     if (gateRetry.ok && gateRetry.body) {
       const gateParsed = await collectUpstream(gateRetry.body);
       const gated = gateToolCalls(gateParsed.content, body.tools);
+      if (gateParsed.chatId) {
+        chatId = gateParsed.chatId;
+        await c.env.CHAT_CACHE?.put(cacheKey, chatId, {
+          expirationTtl: CHAT_CACHE_TTL_SECONDS,
+        });
+      }
       // Accept only a clean retry. Rejected again → drop tool calls rather
       // than send a wrong one to the client.
       if (gated.rejections.length === 0) {
         rawContent = gateParsed.content;
         citations = gateParsed.citations;
+        chatId = gateParsed.chatId ?? chatId;
         if (gateParsed.chatId) {
-          chatId = gateParsed.chatId;
-          if (!promptOnlyAgent) await saveCachedChatId(c.env, cacheKey, chatId);
+          await c.env.CHAT_CACHE?.put(cacheKey, chatId, {
+            expirationTtl: CHAT_CACHE_TTL_SECONDS,
+          });
         }
         toolGate = gated;
         toolCall = gated.calls[0] ?? null;
@@ -420,7 +530,13 @@ chat.post("/v1/chat/completions", async (c) => {
           "The tool result is already above. Answer the user's question from it now. Do not say you will check, search, or look it up.",
       },
     ];
-    const retryBuilt = buildUpstreamRequest(body, model);
+    const retryBuilt = buildUpstreamRequest(body, model, {
+      chatId: promptOnly ? undefined : chatId ?? cachedChatId ?? undefined,
+      fileUrls,
+      contextFilesOnly: toolsRequested && !promptOnly,
+      promptOnly,
+      preserveRoles: model.endpoint === "perplexity" || model.endpoint === "lmsys",
+    });
     const retry = await fetch(
       endpointUrl(retryBuilt.endpoint, c.env.UPSTREAM_CHAT_URL),
       {
@@ -439,9 +555,11 @@ chat.post("/v1/chat/completions", async (c) => {
       if (retryText && !retryCall && !declinedToolUse(retryText)) {
         rawContent = retryParsed.content;
         citations = retryParsed.citations;
+        chatId = retryParsed.chatId ?? chatId;
         if (retryParsed.chatId) {
-          chatId = retryParsed.chatId;
-          if (!promptOnlyAgent) await saveCachedChatId(c.env, cacheKey, chatId);
+          await c.env.CHAT_CACHE?.put(cacheKey, retryParsed.chatId, {
+            expirationTtl: CHAT_CACHE_TTL_SECONDS,
+          });
         }
       }
     }
@@ -465,25 +583,20 @@ chat.post("/v1/chat/completions", async (c) => {
       const citationsTrailer = responseCitations.length
         ? `CITATIONS:${JSON.stringify(responseCitations)}`
         : "";
-      const chatIdTrailer = chatId ? `CHAT_ID:${chatId}` : "";
       controller.enqueue(
-        encoder.encode(`${rawContent}${citationsTrailer}${chatIdTrailer}`),
+        encoder.encode(`${rawContent}${citationsTrailer}`),
       );
       controller.close();
     },
   });
 
   if (body.stream) {
-    const onChatId = (value: string) => {
-      if (!promptOnlyAgent) void saveCachedChatId(c.env, cacheKey, value);
-    };
     const sse = toolsRequested
       ? streamUpstreamWithToolShim(finalBody, {
           id,
           model: model.id,
           created,
           tools: body.tools,
-          onChatId,
           searchUrl: c.env.CLOUDFLARE_SEARCH_URL,
           searchToken: c.env.CLOUDFLARE_SEARCH_TOKEN,
         })
@@ -491,7 +604,6 @@ chat.post("/v1/chat/completions", async (c) => {
           id,
           model: model.id,
           created,
-          onChatId,
           searchUrl: c.env.CLOUDFLARE_SEARCH_URL,
           searchToken: c.env.CLOUDFLARE_SEARCH_TOKEN,
         });

@@ -352,17 +352,8 @@ folds them into a single user message as a role-labelled transcript
 (`System:` / `User:` / `Assistant:`, images kept in place). Multi-turn works,
 but the model sees a transcript rather than native turns.
 
-Two opt-in extension fields let you change that:
-
-| If you want | Add to request body |
-|---|---|
-| Save to chatplayground history | `"metadata": {"save": true}` |
-| Continue a specific chatplayground chat | `"user": "<chatId>"` (CUID from a prior chatplayground session) |
-
-Standard OpenAI SDKs don't surface these but you can hand-craft the request.
-When continuing a chat with `user`, send only the new message: upstream already
-holds that chat's history, and a re-sent `messages[]` would be folded in on
-top of it, so the model would see the history twice.
+`metadata.save: true` opts into saving the folded transcript upstream. `user`
+is ignored for upstream session routing; each req carries its transcript.
 
 ## Architecture
 

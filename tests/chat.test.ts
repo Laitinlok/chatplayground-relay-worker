@@ -33,6 +33,14 @@ const FEED = [
     premiumOnly: false,
   },
   {
+    botId: "grok-4.7",
+    modelName: "grok-4.7",
+    provider: "xAI",
+    group: "chat",
+    endpoint: "lmsys",
+    premiumOnly: false,
+  },
+  {
     botId: "perplexity-sonar",
     modelName: "sonar",
     provider: "Perplexity",
@@ -47,9 +55,14 @@ const FEED = [
 /** Serve the catalogue; delegate /api/chat/* to the test's own reply. */
 function upstream(reply: (url: string) => Response) {
   vi.spyOn(globalThis, "fetch").mockImplementation(
-    async (input: RequestInfo | URL) => {
+    async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-      return url.endsWith("/api/models") ? Response.json(FEED) : reply(url);
+      if (url.endsWith("/api/models")) return Response.json(FEED);
+      if (url.endsWith("/api/upload")) {
+        const file = (init?.body as FormData).get("file") as File;
+        return Response.json({ url: `https://files.example.test/${file.name}` });
+      }
+      return reply(url);
     },
   );
 }
@@ -154,74 +167,6 @@ describe("POST /v1/chat/completions — model resolution", () => {
     const res = await post(hello);
     expect(res.status).toBe(503);
     expect((await envelope(res)).code).toBe("model_discovery_failed");
-  });
-});
-
-describe("POST /v1/chat/completions — chatId cache", () => {
-  function cache() {
-    const values = new Map<string, string>();
-    return {
-      get: vi.fn(async (key: string) => values.get(key) ?? null),
-      put: vi.fn(async (key: string, value: string, _options?: unknown) => {
-        values.set(key, value);
-      }),
-      values,
-    };
-  }
-
-  it("expires chatIds after one hour and scopes cache entries by Worker version and hour", async () => {
-    const CHAT_CACHE = cache();
-    const start = 1_700_000_000_000;
-    vi.spyOn(Date, "now").mockReturnValue(start);
-    upstream(() => new Response(`first answer${CHAT_ID}`));
-
-    const first = await post(hello, {
-      ...env,
-      CHAT_CACHE,
-      CF_VERSION_METADATA: { id: "version-one" },
-    });
-    expect(first.status).toBe(200);
-    expect(CHAT_CACHE.put).toHaveBeenCalledWith(
-      expect.stringContaining("chat:version-one:"),
-      "clm1234567890abcdefgh",
-      { expirationTtl: 60 * 60 },
-    );
-
-    const firstKey = CHAT_CACHE.put.mock.calls[0]?.[0];
-    expect(firstKey).toContain(String(Math.floor(start / (60 * 60 * 1000))));
-
-    vi.mocked(fetch).mockClear();
-    upstream(() => new Response(`same-hour answer${CHAT_ID}`));
-    const sameHour = await post(hello, {
-      ...env,
-      CHAT_CACHE,
-      CF_VERSION_METADATA: { id: "version-one" },
-    });
-    expect(sameHour.status).toBe(200);
-    expect(JSON.parse(String(chatCall()[1].body)).chatId).toBe(
-      "clm1234567890abcdefgh",
-    );
-
-    vi.mocked(fetch).mockClear();
-    upstream(() => new Response(`second answer${CHAT_ID}`));
-    vi.spyOn(Date, "now").mockReturnValue(start + 60 * 60 * 1000);
-    const nextHour = await post(hello, {
-      ...env,
-      CHAT_CACHE,
-      CF_VERSION_METADATA: { id: "version-one" },
-    });
-    expect(nextHour.status).toBe(200);
-    expect(JSON.parse(String(chatCall()[1].body)).chatId).toBe("");
-
-    vi.mocked(fetch).mockClear();
-    upstream(() => new Response(`third answer${CHAT_ID}`));
-    const nextVersion = await post(hello, {
-      ...env,
-      CHAT_CACHE,
-      CF_VERSION_METADATA: { id: "version-two" },
-    });
-    expect(nextVersion.status).toBe(200);
-    expect(JSON.parse(String(chatCall()[1].body)).chatId).toBe("");
   });
 });
 
@@ -704,6 +649,42 @@ describe("POST /v1/chat/completions — delegated search tools", () => {
     expect(payload.choices[0]?.message.content).toContain("freezing grapes");
   });
 
+  it("retries a mixed tool request when the model claims tools are unavailable", async () => {
+    let chats = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/api/models")) return Response.json(FEED);
+        chats += 1;
+        return new Response(
+          chats === 1
+            ? `No directory-listing tool available; I cannot enumerate files.${CHAT_ID}`
+            : `<TOOL_CALL>\ntool: list_directory\nparams:\n{"path":"."}\n</TOOL_CALL>${CHAT_ID}`,
+        );
+      },
+    );
+    const res = await post({
+      ...hello,
+      messages: [{ role: "user", content: "Map the project files" }],
+      tools: [{
+        type: "function",
+        function: {
+          name: "list_directory",
+          description: "List files in a directory.",
+          parameters: {
+            type: "object",
+            properties: { path: { type: "string" } },
+            required: ["path"],
+          },
+        },
+      }],
+    });
+    const payload = (await res.json()) as ChatCompletionResponse;
+    expect(res.status).toBe(200);
+    expect(payload.choices[0]?.message.tool_calls?.[0]?.function.name).toBe("list_directory");
+    expect(chats).toBe(2);
+  });
+
   it("does not return incomplete TOOL_CALL XML after a failed gate retry", async () => {
     let chats = 0;
     vi.spyOn(globalThis, "fetch").mockImplementation(
@@ -941,62 +922,67 @@ describe("POST /v1/chat/completions — non-streaming", () => {
   });
 });
 
-describe("POST /v1/chat/completions — chatId cache", () => {
-  function chatCache() {
-    const values = new Map<string, string>();
-    return {
-      values,
-      get: vi.fn(async (key: string) => values.get(key) ?? null),
-      put: vi.fn(
-        async (
-          key: string,
-          value: string,
-          _options?: { expirationTtl: number },
-        ) => {
-          values.set(key, value);
-        },
-      ),
-    };
-  }
-
-  it("uses cached chatIds only within the same deployment and hour", async () => {
-    const cache = chatCache();
-    const now = 1_800_000_000_000;
-    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(now);
-    upstream(() => new Response(`ok${CHAT_ID}`));
-    const testEnv = {
-      ...env,
-      CHAT_CACHE: cache,
-      CF_VERSION_METADATA: { id: "version-a" },
-    };
-    const requestHeaders = { "x-conversation-id": "conversation-1" };
-    const firstKey = `chat:version-a:${Math.floor(now / (60 * 60 * 1000))}:conversation-1`;
-
-    await post(hello, testEnv, requestHeaders);
-    expect(cache.put).toHaveBeenLastCalledWith(
-      firstKey,
-      "clm1234567890abcdefgh",
-      { expirationTtl: 60 * 60 },
-    );
-
-    await post(hello, testEnv, requestHeaders);
-    expect(cache.get).toHaveBeenLastCalledWith(firstKey);
-    expect(JSON.parse(String(chatCall()[1].body)).chatId).toBe(
-      "clm1234567890abcdefgh",
-    );
-
-    testEnv.CF_VERSION_METADATA = { id: "version-b" };
-    await post(hello, testEnv, requestHeaders);
-    expect(JSON.parse(String(chatCall()[1].body)).chatId).toBe("");
-
-    testEnv.CF_VERSION_METADATA = { id: "version-a" };
-    nowSpy.mockReturnValue(now + 60 * 60 * 1000);
-    await post(hello, testEnv, requestHeaders);
-    expect(JSON.parse(String(chatCall()[1].body)).chatId).toBe("");
-  });
-});
 
 describe("POST /v1/chat/completions — upstream request", () => {
+  it("returns a live-search tool call for Grok without upstream history", async () => {
+    let uploadedTools = "";
+    let requestBody: Record<string, unknown> | undefined;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/api/models")) return Response.json(FEED);
+      if (url.endsWith("/api/upload")) {
+        const file = (init?.body as FormData).get("file") as File;
+        const text = await file.text();
+        if (file.name === "tools.txt") uploadedTools = text;
+        return Response.json({ url: `https://files.example.test/${file.name}` });
+      }
+      if (url.includes("/api/chat/")) {
+        requestBody = JSON.parse(String(init?.body));
+        return new Response(`ok${CHAT_ID}`);
+      }
+      return new Response("unexpected endpoint", { status: 500 });
+    });
+
+    const res = await post({
+      model: "grok-4.7",
+      messages: [
+        { role: "user", content: "Earlier question" },
+        { role: "assistant", content: "Earlier answer" },
+        { role: "user", content: "Latest TikTok food hacks" },
+      ],
+      tools: [
+        {
+          type: "function",
+          function: {
+            name: "web_search",
+            description: "Search the web",
+            parameters: { type: "object", properties: { query: { type: "string" } } },
+          },
+        },
+        {
+          type: "function",
+          function: {
+            name: "create_document",
+            description: "Create a document from search results",
+            parameters: { type: "object", properties: { title: { type: "string" } } },
+          },
+        },
+      ],
+    });
+
+    expect(res.status).toBe(200);
+    const payload = (await res.json()) as ChatCompletionResponse;
+    expect(payload.choices[0]?.finish_reason).toBe("tool_calls");
+    expect(payload.choices[0]?.message.tool_calls?.[0]).toMatchObject({
+      function: {
+        name: "web_search",
+        arguments: JSON.stringify({ query: "Latest TikTok food hacks" }),
+      },
+    });
+    expect(requestBody).toBeUndefined();
+    expect(uploadedTools).toBe("");
+  });
+
   it("does not inject reasoning instructions unless requested", async () => {
     upstream(() => new Response(`ok${CHAT_ID}`));
     await post(hello);
@@ -1011,6 +997,43 @@ describe("POST /v1/chat/completions — upstream request", () => {
       ),
     ).toBe(false);
     expect(request.reasoning_effort).toBe("medium");
+  });
+
+  it("injects the tool-use prompt on every multi-turn request", async () => {
+    const fileUploads: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/api/models")) return Response.json(FEED);
+      if (url.endsWith("/api/upload")) {
+        fileUploads.push(((init?.body as FormData).get("file") as File).name);
+        return Response.json({ url: `https://files.example.test/${fileUploads.at(-1)}` });
+      }
+      return new Response(`ok${CHAT_ID}`);
+    });
+    await post({
+      ...hello,
+      messages: [
+        { role: "user", content: "Earlier request" },
+        { role: "assistant", content: "Earlier response" },
+        { role: "user", content: "Current request" },
+      ],
+      tools: [
+        {
+          type: "function",
+          function: {
+            name: "create_document",
+            parameters: {
+              type: "object",
+              properties: { title: { type: "string" } },
+            },
+          },
+        },
+      ],
+    });
+    const upstreamBody = JSON.parse(String(chatCall()[1].body));
+    const transcript = String(upstreamBody.messages[0]?.content);
+    expect(transcript).toContain("Current request");
+    expect(fileUploads).toEqual(["tools.txt", "history.txt"]);
   });
 
   it("disables Luna reasoning on chat completions when tools are present", async () => {
@@ -1042,9 +1065,81 @@ describe("POST /v1/chat/completions — upstream request", () => {
     expect(JSON.parse(String(init.body))).toMatchObject({
       modelName: "sonar",
       botId: "perplexity-sonar",
-      chatId: "cabc123",
+      chatId: "",
       noSave: true,
     });
+  });
+
+  it("uploads history and tool context on subsequent turns and caps user file URLs", async () => {
+    const fileUploads: string[] = [];
+    let upstreamFileUrl = "";
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/api/models")) return Response.json(FEED);
+      if (url.endsWith("/api/upload")) {
+        const form = init?.body as FormData;
+        const file = form.get("file") as File;
+        fileUploads.push(file.name);
+        return Response.json({ url: `https://files.example.test/${file.name}` });
+      }
+      const payload = JSON.parse(String(init?.body));
+      upstreamFileUrl = payload.fileUrl;
+      return new Response(`answer${CHAT_ID}`);
+    });
+    const res = await post(
+      {
+        ...hello,
+        messages: [
+          { role: "user", content: "previous" },
+          { role: "assistant", content: "answer" },
+          { role: "user", content: "continue" },
+        ],
+        file_ids: Array.from({ length: 4 }, (_, i) => `https://files.example.test/user-${i + 1}.pdf`),
+        tools: [{ type: "function", function: { name: "lookup", parameters: { type: "object" } } }],
+      },
+      env,
+    );
+    expect(res.status).toBe(200);
+    expect(fileUploads).toEqual(["tools.txt", "history.txt"]);
+    expect(upstreamFileUrl).toContain("https://files.example.test/user-4.pdf");
+    expect(upstreamFileUrl).toContain("https://files.example.test/tools.txt");
+    expect(upstreamFileUrl).toContain("https://files.example.test/history.txt");
+  });
+
+  it("resumes cached chats only when request messages contain prior history", async () => {
+    const cacheValues = new Map<string, string>();
+    const CHAT_CACHE = {
+      get: vi.fn(async (key: string) => cacheValues.get(key) ?? null),
+      put: vi.fn(async (key: string, value: string) => {
+        cacheValues.set(key, value);
+      }),
+    };
+    const testEnv = {
+      ...env,
+      CHAT_CACHE,
+      CF_VERSION_METADATA: { id: "version-one" },
+    };
+    upstream(() => new Response(`first${CHAT_ID}`));
+    await post(hello, testEnv);
+    expect(JSON.parse(String(chatCall()[1].body)).chatId).toBe("");
+
+    vi.mocked(fetch).mockClear();
+    upstream(() => new Response(`second${CHAT_ID}`));
+    await post(
+      {
+        model: hello.model,
+        messages: [
+          { role: "user", content: "first prompt" },
+          { role: "assistant", content: "first answer" },
+          { role: "user", content: "second prompt" },
+        ],
+      },
+      testEnv,
+    );
+    const resumedBody = JSON.parse(String(chatCall()[1].body));
+    expect(resumedBody.chatId).toBe("clm1234567890abcdefgh");
+    expect(String(resumedBody.messages[0].content)).toContain("second prompt");
+    expect(String(resumedBody.messages[0].content)).toContain("first answer");
   });
 
   it("honors metadata.save by clearing noSave", async () => {
@@ -1134,4 +1229,80 @@ describe("POST /v1/chat/completions — streaming", () => {
       "See [1].\n\n---\n**Sources**\n\n1. [a.test](https://a.test)",
     );
   });
+
+  it("retries when continue-turn skips tools with a plan instead of XML", async () => {
+    let chats = 0;
+    upstream(() => {
+      chats += 1;
+      return new Response(
+        (chats === 1
+          ? "I'll create the document from these results next."
+          : `<TOOL_CALL>\ntool: create_document\nparams:\n{"title":"TikTok food hacks","body":"Freeze grapes."}\n</TOOL_CALL>`) +
+          CHAT_ID,
+      );
+    });
+    const res = await post({
+      model: "gpt-5.6-luna",
+      messages: [
+        { role: "user", content: "Create a doc of latest TikTok food hacks" },
+        {
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            {
+              id: "call_search",
+              type: "function",
+              function: {
+                name: "web_search",
+                arguments: '{"query":"latest TikTok food hacks"}',
+              },
+            },
+          ],
+        },
+        {
+          role: "tool",
+          tool_call_id: "call_search",
+          content: "Freeze grapes for a crunchy snack.",
+        },
+      ],
+      tools: [
+        {
+          type: "function",
+          function: {
+            name: "web_search",
+            parameters: {
+              type: "object",
+              properties: { query: { type: "string" } },
+              required: ["query"],
+            },
+          },
+        },
+        {
+          type: "function",
+          function: {
+            name: "create_document",
+            parameters: {
+              type: "object",
+              properties: {
+                title: { type: "string" },
+                body: { type: "string" },
+              },
+              required: ["title", "body"],
+            },
+          },
+        },
+      ],
+    });
+    expect(res.status).toBe(200);
+    const payload = (await res.json()) as {
+      choices?: Array<{
+        message?: { tool_calls?: Array<{ function?: { name?: string } }> };
+      }>;
+    };
+    expect(payload.choices?.[0]?.message?.tool_calls?.[0]?.function?.name).toBe(
+      "create_document",
+    );
+    expect(chats).toBeGreaterThanOrEqual(2);
+  });
+
 });

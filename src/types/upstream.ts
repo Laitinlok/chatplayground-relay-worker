@@ -30,7 +30,7 @@ interface UpstreamBodyBase {
   chatId: string; // CUID, or "" for a fresh chat
   isRegenerate: boolean;
   promptTemplate: null;
-  fileUrl: null;
+  fileUrl: string | null;
   botId: string; // short id, e.g. "perplexity-sonar"
   submissionId: string;
   noSave: boolean;

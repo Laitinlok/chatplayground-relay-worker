@@ -8,6 +8,8 @@ import {
   stripToolCallMarkup,
   toolCallRetrySignal,
   tryParseRelayToolCall,
+  missingToolCallRetrySignal,
+  looksLikeNonXmlToolAttempt,
   type OpenAITool,
 } from "../src/utils/tool-shim";
 
@@ -29,9 +31,13 @@ describe("tool prompt updates", () => {
     const next = injectToolPrompt(first, tools, "required");
     const prompt = String(next[0]?.content);
     expect(prompt).toContain("Be concise.");
-    expect(prompt).toContain("You must call exactly one listed tool.");
-    expect(prompt).toContain("## cron");
+    expect(prompt).toContain("You must call one or more listed tools.");
+    expect(prompt).toContain('"name":"cron"');
     expect(prompt).not.toContain('You must call the tool named "web_search".');
+    expect(prompt).toContain("generic terminal/command tool can list directories");
+    expect(prompt).toContain(
+      "choose the best matching listed tool by its description",
+    );
     expect(prompt.match(/\[relay-tool-prompt-v1\]/g)).toHaveLength(1);
   });
 });
@@ -250,6 +256,107 @@ params:
     ).toBe(true);
   });
 
+  
+  
+  it("detects non-XML tool attempts and builds a missing-tool retry signal", () => {
+    expect(
+      looksLikeNonXmlToolAttempt(
+        '```json\n{"tool":"web_search","params":{"query":"x"}}\n```',
+      ),
+    ).toBe(true);
+    expect(looksLikeNonXmlToolAttempt("I'll create the document next.")).toBe(
+      true,
+    );
+    expect(looksLikeNonXmlToolAttempt("Here is the final summary.")).toBe(
+      false,
+    );
+    const signal = missingToolCallRetrySignal(tools);
+    expect(signal).toContain("<TOOL_CALL>");
+    expect(signal).toContain("web_search");
+    expect(signal).toContain("Do not use a Markdown JSON code fence");
+  });
+
+  it("parses Markdown JSON tool fences as functional tool calls", () => {
+    const call = tryParseRelayToolCall(
+      '```json\n{"tool":"web_search","params":{"query":"latest TikTok food hacks"}}\n```',
+      tools,
+    );
+    expect(call?.function).toEqual({
+      name: "web_search",
+      arguments: '{"query":"latest TikTok food hacks"}',
+    });
+  });
+
+  it("parses multiple OpenAI-shaped tool_calls from a JSON object", () => {
+    const gated = gateToolCalls(
+      JSON.stringify({
+        tool_calls: [
+          {
+            function: {
+              name: "web_search",
+              arguments: { query: "latest TikTok food hacks" },
+            },
+          },
+          {
+            function: {
+              name: "create_document",
+              arguments: { title: "Food hacks", body: "..." },
+            },
+          },
+        ],
+      }),
+      [
+        ...tools,
+        {
+          type: "function",
+          function: {
+            name: "create_document",
+            parameters: {
+              type: "object",
+              properties: {
+                title: { type: "string" },
+                body: { type: "string" },
+              },
+              required: ["title", "body"],
+            },
+          },
+        },
+      ],
+    );
+    expect(gated.calls.map((call) => call.function.name)).toEqual([
+      "web_search",
+      "create_document",
+    ]);
+  });
+
+  it("compresses every advertised tool without dropping names", () => {
+    const many = Array.from({ length: 20 }, (_, index) => ({
+      type: "function" as const,
+      function: {
+        name: `tool_${index}`,
+        description: `Utility tool number ${index} with a long description that should be truncated in the compact index`,
+        parameters: {
+          type: "object",
+          properties: {
+            value: { type: "string", description: "input value" },
+          },
+          required: ["value"],
+        },
+      },
+    }));
+    const prompt = buildToolSystemPrompt([
+      ...tools,
+      ...many,
+    ]);
+    expect(prompt).toContain("tools; every entry is available");
+    expect(prompt.length).toBeLessThan(12_000);
+    expect(prompt).toContain("web_search");
+    expect(prompt).toContain("cron");
+    for (let index = 0; index < 20; index++) {
+      expect(prompt).toContain(`tool_${index}`);
+    }
+  });
+
   it("parses the xml tool block", () => {
     const call = tryParseRelayToolCall(
       '<TOOL_CALL>\ntool: web_search\nparams:\n{"query":"latest news","max_results":3}\n</TOOL_CALL>',
@@ -370,6 +477,7 @@ params:
   });
 
   it("injects a compact catalog with required parameter guidance", () => {
+    expect(buildToolSystemPrompt(tools, undefined, undefined, false)).toContain("tools.txt");
     const prompt = buildToolSystemPrompt([
       {
         type: "function",
@@ -388,7 +496,7 @@ params:
     expect(prompt).toContain("get_weather");
     expect(prompt).toContain('"city"');
     expect(prompt).toContain("<AVAILABLE_TOOLS>");
-    expect(prompt).toContain("one <TOOL_CALL> block per tool");
+    expect(prompt).toContain("You may call multiple tools in one assistant turn.");
   });
   it("adds a strict dispatch protocol for Perplexity models", () => {
     const prompt = buildToolSystemPrompt(

@@ -149,6 +149,17 @@ describe("getModels — failure is a 503, never a stale list", () => {
     return expect(getModels(env)).rejects;
   };
 
+  it("retries a transient registry failure and uses the next successful feed", async () => {
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response("", { status: 500 }))
+      .mockResolvedValueOnce(Response.json([entry()]));
+
+    const models = await getModels(env);
+
+    expect(models[0]?.id).toBe("gpt-5.6-luna");
+    expect(vi.mocked(fetch)).toHaveBeenCalledTimes(2);
+  });
+
   it("503s when the feed request fails", async () => {
     await failsWith(
       async () => new Response("", { status: 500 }),

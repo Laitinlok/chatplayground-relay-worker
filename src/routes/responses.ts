@@ -30,6 +30,8 @@ import {
   stripToolCallMarkup,
   rejectedToolCallStub,
   toolCallRetrySignal,
+  missingToolCallRetrySignal,
+  looksLikeNonXmlToolAttempt,
   tryParseRelayToolCall,
   type ToolCallGateResult,
 } from "../utils/tool-shim";
@@ -53,9 +55,10 @@ import {
 } from "../utils/tool-selector";
 import { resolveCitationTitles } from "../utils/citation-titles";
 import { resolveReasoningEffort } from "../utils/reasoning-prefill";
+import { chatCacheKey, saveCachedChatId } from "../utils/chat-cache";
 
 const MAX_HOSTED_TOOL_STEPS = 4;
-const MAX_WEB_SEARCH_CALLS = 2;
+const MAX_WEB_SEARCH_CALLS = 4;
 const MAX_SEARCH_RESULTS_PER_CALL = 50;
 const PREFLIGHT_SEARCH_RESULT_COUNT = 10;
 const NON_LUNA_PREFLIGHT_SEARCH_RESULT_COUNT = 5;
@@ -187,13 +190,33 @@ function isHostedFetchTool(
   return Boolean(tool && isFetchTool(tool));
 }
 
+
+function toolParameterNamesFor(tool: OpenAITool): string[] {
+  const parameters = tool.function.parameters;
+  if (!parameters || typeof parameters !== "object" || Array.isArray(parameters))
+    return [];
+  const properties = (parameters as { properties?: unknown }).properties;
+  return properties && typeof properties === "object" && !Array.isArray(properties)
+    ? Object.keys(properties)
+    : [];
+}
+
 function isSearchPlanOnly(text: string): boolean {
-  const normalized = text.trim().replace(/^[-*\s]+/, "");
+  const normalized = text
+    .replace(/<think\b[^>]*>[\s\S]*?<\/think>/gi, " ")
+    .replace(/<\|[^|>]+\|>/g, " ")
+    .replace(/[\u2018\u2019\u201B\u2032\u02BC]/g, "'")
+    .replace(/[\u201C\u201D]/g, '"')
+    .trim()
+    .replace(/^[-*\s]+/, "");
   return (
-    normalized.length <= 240 &&
-    /^(?:i(?:'ll| will)|let me|now,? i(?:'ll| will)|searching(?:\s+now)?|looking up|checking|first,? i(?:'ll| will))\b/i.test(
+    normalized.length <= 280 &&
+    (/^(?:i(?:'ll| will)|let me|now,? i(?:'ll| will)|searching(?:\s+now)?|looking up|checking|first,? i(?:'ll| will))\b/i.test(
       normalized,
-    )
+    ) ||
+      /\b(?:i'll|i will|let me)\b[\s\S]{0,120}\b(?:fetch|pull|read|open|check|search|look up|browse)\b/i.test(
+        normalized,
+      ))
   );
 }
 
@@ -661,6 +684,8 @@ responses.post("/v1/responses", async (c) => {
   // mode even for ordinary Responses requests. Preserve an explicit caller
   // choice, but make their default answer turn immediate.
   const fastDefaultModel = /(?:grok|glm)/.test(modelName);
+  const isGrok = modelName.includes("grok");
+  const promptOnly = /(?:grok|glm)/.test(modelName);
 
   const request = responsesToChatRequest({ ...raw, input });
   // Responses clients expect native reasoning output, not an injected
@@ -694,6 +719,9 @@ responses.post("/v1/responses", async (c) => {
       ? "web_search"
       : null;
   const tools = request.tools ?? [];
+  const hasNonWebTools = tools.some(
+    (tool) => !isSearchTool(tool) && !isFetchTool(tool),
+  );
   const hostedSearchNames = new Set<string>();
   if (requestedSearchPreview) hostedSearchNames.add("web_search_preview");
   if (requestedRegularSearch) hostedSearchNames.add("web_search");
@@ -725,13 +753,18 @@ responses.post("/v1/responses", async (c) => {
     hostedSearchNames.add("web-browsing");
     hasWebSearch = true;
   }
-  const latestUserText = [...request.messages].reverse().reduce(
-    (found, message) => {
-      if (found || message.role !== "user") return found;
-      return typeof message.content === "string" ? message.content : found;
-    },
-    "",
-  );
+  const latestUserMessage = [...request.messages]
+    .reverse()
+    .find((message) => message.role === "user");
+  const latestUserText =
+    typeof latestUserMessage?.content === "string"
+      ? latestUserMessage.content
+      : Array.isArray(latestUserMessage?.content)
+        ? latestUserMessage.content
+            .filter((part) => part.type === "text")
+            .map((part) => part.text)
+            .join(" ")
+        : "";
   const latestUserIndex = request.messages.findLastIndex(
     (message) => message.role === "user",
   );
@@ -774,17 +807,20 @@ responses.post("/v1/responses", async (c) => {
   }
   // Keep hosted search hidden for ordinary prompts, except when the caller
   // explicitly selected that named search tool.
-  const toolsForModel = prioritizeSearchTools(
-    tools.filter(
-      (tool) =>
-        needsHostedSearch ||
-        (forcedHostedSearch && tool.function.name === forcedToolName) ||
-        (!hostedSearchNames.has(tool.function.name) &&
-          !(preferredResponsesSearch && isFetchTool(tool))),
-    ),
-    hasRelaySearchResult || typeof request.tool_choice === "object",
-    latestUserText,
-  );
+  const toolsForModel = hasNonWebTools
+    ? tools
+    : prioritizeSearchTools(
+        tools.filter(
+          (tool) =>
+            needsHostedSearch ||
+            (forcedHostedSearch && tool.function.name === forcedToolName) ||
+            (!hostedSearchNames.has(tool.function.name) &&
+              !(preferredResponsesSearch && isFetchTool(tool))) ||
+            (hasRelaySearchResult && isFetchTool(tool)),
+        ),
+        hasRelaySearchResult || typeof request.tool_choice === "object",
+        latestUserText,
+      );
   request.tools = toolsForModel.length > 0 ? toolsForModel : undefined;
   const forcedToolChoice = request.tool_choice;
   if (
@@ -797,17 +833,50 @@ responses.post("/v1/responses", async (c) => {
     // Initial forced fetch/scrape is replaced by the search-first route.
     request.tool_choice = "auto";
   }
+  if (!promptOnly && raw.previous_response_id && Array.isArray(input) && latestUserText) {
+    request.messages.unshift({ role: "user", content: latestUserText });
+  }
   const searches: Array<{ query: string; results: WebSearchResult[] }> = [];
+  const seenSearchQueries = new Map<string, WebSearchResult[]>();
+  let repeatedSearchQuery = false;
   const fetchedPages = new Map<string, WebSearchResult>();
   // toolsRequested is true only if caller provided tools; we do not auto-add tools.
   const toolsRequested =
     toolsForModel.length > 0 && request.tool_choice !== "none";
   const sessionToken = await c.get("sessionToken")();
+  const conversationId =
+    c.req.header("x-conversation-id") ??
+    raw.metadata?.conversation_id ??
+    raw.previous_response_id;
+  const cacheKey = await chatCacheKey(
+    sessionToken,
+    model.id,
+    c.env.CF_VERSION_METADATA?.id ?? "local",
+    conversationId,
+  );
+  const hasHistory =
+    !promptOnly &&
+    (Boolean(raw.previous_response_id) || request.messages.length > 1);
+  let activeChatId =
+    hasHistory && c.env.CHAT_CACHE
+      ? await c.env.CHAT_CACHE.get(cacheKey)
+      : null;
+  if (!promptOnly && !activeChatId && raw.previous_response_id && c.env.CHAT_CACHE) {
+    const previousKey = await chatCacheKey(
+      sessionToken,
+      model.id,
+      c.env.CF_VERSION_METADATA?.id ?? "local",
+      raw.previous_response_id,
+    );
+    activeChatId = await c.env.CHAT_CACHE.get(previousKey);
+  }
   let selectedTool: ReturnType<typeof tryParseRelayToolCall> = null;
   if (toolsRequested) {
     request.tools = toolsForModel;
     selectedTool =
-      preferredResponsesSearch || isVeryBasicQuery(latestUserText)
+      promptOnly && needsHostedSearch && !hasRelaySearchResult
+        ? createSearchToolCall(latestUserText, toolsForModel)
+        : hasNonWebTools || preferredResponsesSearch || isVeryBasicQuery(latestUserText)
         ? null
         : await selectToolForAutoChoice(
             request,
@@ -816,7 +885,10 @@ responses.post("/v1/responses", async (c) => {
             sessionToken,
             hasRelaySearchResult,
           );
-    if (selectedTool) {
+    if (selectedTool && request.tool_choice === undefined) {
+      request.tool_choice = "auto";
+    }
+    if (selectedTool && !hasNonWebTools && !preferredResponsesSearch) {
       request.tool_choice = {
         type: "function",
         function: { name: selectedTool.function.name },
@@ -837,6 +909,19 @@ responses.post("/v1/responses", async (c) => {
     }
   }
 
+  if (activeChatId && raw.previous_response_id) {
+    const lastAssistantTurn = request.messages.findLastIndex(
+      (message) => message.role === "assistant",
+    );
+    if (lastAssistantTurn >= 0) {
+      request.messages = request.messages.filter(
+        (message, index) =>
+          (index === 0 &&
+            (message.role === "system" || message.role === "developer")) ||
+          index > lastAssistantTurn,
+      );
+    }
+  }
   await bridgeInlineImages(request.messages, c.env, sessionToken);
   const preflightSearchResultCount = isLuna
     ? PREFLIGHT_SEARCH_RESULT_COUNT
@@ -872,6 +957,7 @@ responses.post("/v1/responses", async (c) => {
         ? clientSearchTools[0]
         : null;
   const canPreflightSearch =
+    !hasNonWebTools &&
     !selectedTool &&
     !isVeryBasicQuery(latestUserText) &&
     (!forcedToolName || forcedHostedSearch) &&
@@ -1031,10 +1117,7 @@ responses.post("/v1/responses", async (c) => {
           ),
         },
       );
-      const followUpTools = tools.filter(
-        (tool) =>
-          !hostedSearchNames.has(tool.function.name) && !isSearchTool(tool),
-      );
+      const followUpTools = tools;
       request.tools = followUpTools.length > 0 ? followUpTools : undefined;
       request.tool_choice = followUpTools.length > 0 ? "auto" : "none";
       if (followUpTools.length > 0) {
@@ -1059,7 +1142,10 @@ responses.post("/v1/responses", async (c) => {
   let fallbackToolCalls: ReturnType<typeof gateToolCalls>["calls"] = [];
 
   for (let step = 0; step <= MAX_HOSTED_TOOL_STEPS; step++) {
-    const built = buildUpstreamRequest(request, model);
+    const built = buildUpstreamRequest(request, model, {
+      chatId: promptOnly ? undefined : activeChatId ?? undefined,
+      promptOnly,
+    });
     upstream = await fetch(
       endpointUrl(built.endpoint, c.env.UPSTREAM_CHAT_URL),
       {
@@ -1104,18 +1190,14 @@ responses.post("/v1/responses", async (c) => {
     }
 
     parsedContent = await collectUpstream(upstream.body);
+    activeChatId = parsedContent.chatId ?? activeChatId;
+    await saveCachedChatId(c.env.CHAT_CACHE, cacheKey, activeChatId);
     rawContent = removeRelayProtocolLeak(
       extractResponsesText(parsedContent.content),
     );
-    // `toolsRequested` reflects the client request. The active tool set can
-    // be removed after relay-hosted search, so never parse a subsequent model
-    // envelope as a valid call when no tool is currently exposed upstream.
     const activeToolsRequested =
       Boolean(request.tools?.length) && request.tool_choice !== "none";
-    // Gate against tools active on this upstream turn. Hosted search is
-    // removed after its result is available, so a repeated hosted envelope is
-    // prose to strip rather than a second search operation.
-    const gated = activeToolsRequested
+    let gated = activeToolsRequested
       ? gateToolCalls(rawContent, request.tools)
       : { calls: [], rejections: [] };
     const initialGate = gated;
@@ -1130,34 +1212,150 @@ responses.post("/v1/responses", async (c) => {
             (tool) => tool.function.name === preferredResponsesSearch,
           ) ?? [])
         : [];
-    const selectedSearch =
+    let selectedSearch =
       step === 0 &&
       initialGate.calls.length === 0 &&
       initialGate.rejections.length === 0 &&
       explicitHostedTool.length > 0 &&
+      !hasNonWebTools &&
       (needsHostedSearch || forcedHostedSearch)
         ? createSearchToolCall(latestUserText, explicitHostedTool)
         : null;
+    // Grok/Luna often narrate "I'll pull headlines..." instead of emitting XML.
+    // On the first tool turn, coerce a hosted/client search call when the user
+    // asked for current info or the model only produced a plan.
+    // function_call_output is stored as role=tool with name=call_id, not the
+    // tool name. Any prior tool result means this is a continue turn.
+    const alreadyHasSearchResult = request.messages.some(
+      (message) => message.role === "tool",
+    );
+    if (
+      !selectedSearch &&
+      step === 0 &&
+      searches.length === 0 &&
+      !alreadyHasSearchResult &&
+      initialGate.calls.length === 0 &&
+      initialGate.rejections.length === 0 &&
+      request.tool_choice !== "none" &&
+      !hasNonWebTools &&
+      (needsHostedSearch ||
+        isSearchPlanOnly(rawContent) ||
+        looksLikeNonXmlToolAttempt(rawContent))
+    ) {
+      const searchTools = [
+        ...explicitHostedTool,
+        ...tools.filter(isSearchTool),
+      ].filter(
+        (tool, index, list) =>
+          list.findIndex((item) => item.function.name === tool.function.name) ===
+          index,
+      );
+      selectedSearch = createSearchToolCall(latestUserText, searchTools);
+    }
+    if (
+      !selectedSearch &&
+      !hasNonWebTools &&
+      searches.length > 0 &&
+      initialGate.calls.length === 0
+    ) {
+      selectedSearch = await selectToolForAutoChoice(
+        request,
+        model,
+        c.env,
+        sessionToken,
+        true,
+      );
+    }
+    if (
+      !selectedSearch &&
+      searches.length > 0 &&
+      initialGate.calls.length === 0 &&
+      initialGate.rejections.length === 0
+    ) {
+      // After hosted search, Grok/Luna often narrate "I'll pull/fetch..." instead
+      // of emitting a tool call. Force the hosted fetch whenever results exist
+      // and fetch has not already run — do not depend only on plan-text heuristics.
+      const fetchTool = tools.find(isFetchTool);
+      const fetchAlreadyRan = request.messages.some(
+        (message) =>
+          message.role === "tool" && message.name === fetchTool?.function.name,
+      );
+      const url = fetchedPages.values().next().value?.url;
+      // Only coerce a fetch for empty/refusal/plan narration. A real answer
+      // after search must remain a final response.
+      const shouldForceFetch =
+        Boolean(fetchTool && url && !fetchAlreadyRan) &&
+        (isSearchPlanOnly(rawContent) ||
+          declinedToolUse(rawContent) ||
+          !rawContent.trim());
+      if (shouldForceFetch && fetchTool && url) {
+        selectedSearch = gateToolCalls(
+          `<TOOL_CALL>\ntool: ${fetchTool.function.name}\nparams:\n${JSON.stringify({ url })}\n</TOOL_CALL>`,
+          tools,
+        ).calls[0] ?? null;
+      }
+    }
     toolGate = selectedSearch
       ? { calls: [selectedSearch], rejections: [] }
       : initialGate;
-    // Wrong/invalid tool calls: retry once with the gate rejection signal.
+    // Wrong/invalid/missing tool calls: retry once and demand <TOOL_CALL> XML.
     // Skip the retry when a valid call already exists — avoids Agora timeout retries.
-    if (
-      isLuna &&
+    const toolChoiceRequiresCall =
+      request.tool_choice === "required" ||
+      (typeof request.tool_choice === "object" &&
+        "function" in request.tool_choice);
+    const hasPriorToolResult = request.messages.some(
+      (message) => message.role === "tool",
+    );
+    // After results exist, search-plan narration should become an answer.
+    // Only non-search follow-ups (create/edit/file/terminal) force another XML call.
+    const wantsFollowUpTool =
+      /\b(?:create|write|edit|replace|docx|document|file|terminal|command|attach)\b/i.test(
+        rawContent,
+      ) &&
+      (looksLikeNonXmlToolAttempt(rawContent) ||
+        /isn['’]t available|not available|cannot|can['’]t|unable to/i.test(
+          rawContent,
+        ));
+    const claimsToolsUnavailable =
+      /\b(?:don't|do not) have\b[\s\S]{0,100}\b(?:repository|files?|directory|tools?|access)\b|\bno\b[\s\S]{0,60}\b(?:usable )?(?:tool|access|repository|directory|file)\b|\b(?:enable|provide)\b[\s\S]{0,60}\b(?:tool|directory|project tree|repository)\b/i.test(
+        rawContent,
+      );
+    const shouldRetryMissingTool =
       toolsRequested &&
-      toolGate.rejections.length > 0 &&
-      toolGate.calls.length === 0
-    ) {
+      toolGate.calls.length === 0 &&
+      (toolGate.rejections.length > 0 ||
+        toolChoiceRequiresCall ||
+        (hasNonWebTools &&
+          (looksLikeNonXmlToolAttempt(rawContent) || claimsToolsUnavailable)) ||
+        ((isLuna || fastDefaultModel) &&
+          !hasPriorToolResult &&
+          searches.length === 0 &&
+          needsHostedSearch &&
+          (isSearchPlanOnly(rawContent) ||
+            looksLikeNonXmlToolAttempt(rawContent))) ||
+        ((isLuna || fastDefaultModel) && hasPriorToolResult && wantsFollowUpTool));
+    if (shouldRetryMissingTool) {
+      const retryUser =
+        toolGate.rejections.length > 0
+          ? toolCallRetrySignal(toolGate.rejections)
+          : missingToolCallRetrySignal(request.tools ?? tools);
       request.messages = [
         ...request.messages,
         {
           role: "assistant",
-          content: rejectedToolCallStub(toolGate.rejections),
+          content:
+            toolGate.rejections.length > 0
+              ? rejectedToolCallStub(toolGate.rejections)
+              : stripToolCallMarkup(rawContent) ||
+                "Skipped required tool call.",
         },
-        { role: "user", content: toolCallRetrySignal(toolGate.rejections) },
+        { role: "user", content: `${latestUserText}\n\n${retryUser}` },
       ];
-      const gateBuilt = buildUpstreamRequest(request, model);
+      const gateBuilt = buildUpstreamRequest(request, model, {
+        chatId: promptOnly ? undefined : activeChatId ?? undefined,
+        promptOnly,
+      });
       const gateRetry = await fetch(
         endpointUrl(gateBuilt.endpoint, c.env.UPSTREAM_CHAT_URL),
         {
@@ -1169,6 +1367,8 @@ responses.post("/v1/responses", async (c) => {
       );
       if (gateRetry.ok && gateRetry.body) {
         const gateParsed = await collectUpstream(gateRetry.body);
+        activeChatId = gateParsed.chatId ?? activeChatId;
+        await saveCachedChatId(c.env.CHAT_CACHE, cacheKey, activeChatId);
         const gatedText = removeRelayProtocolLeak(
           extractResponsesText(gateParsed.content),
         );
@@ -1196,29 +1396,56 @@ responses.post("/v1/responses", async (c) => {
     }
     const toolCalls = toolGate.calls;
     toolCall = toolCalls[0] ?? null;
-    if (
-      toolCalls.some((call) => hostedSearchNames.has(call.function.name)) &&
-      toolCalls.some((call) => !hostedSearchNames.has(call.function.name))
-    ) {
-      throw upstreamError(
-        502,
-        "Provider returned hosted and client tool calls together; retry without parallel tool calls.",
-      );
-    }
-    const hostedCalls = toolCalls.filter((call) =>
-      hostedSearchNames.has(call.function.name),
-    );
-    if (hostedCalls.length !== toolCalls.length) break;
-    const calls = hostedCalls.filter((call) =>
-      isHostedSearchTool(call.function.name, tools),
-    );
+    const isRelayHostedCall = (call: (typeof toolCalls)[number]) =>
+      hostedSearchNames.has(call.function.name) ||
+      isHostedFetchTool(call.function.name, tools);
+    // Allow mixed turns (e.g. web_search + create_docx). Run hosted tools
+    // first, then return any remaining client tool calls to the caller.
+    const calls = toolCalls.filter(isRelayHostedCall);
+    const clientCalls = toolCalls.filter((call) => !isRelayHostedCall(call));
     if (calls.length === 0 || step === MAX_HOSTED_TOOL_STEPS) break;
 
     const searchCalls = calls.filter((call) =>
       isHostedSearchTool(call.function.name, tools),
     );
+    const novelSearchCalls = searchCalls.filter((call) => {
+      try {
+        const args = JSON.parse(call.function.arguments) as {
+          query?: unknown;
+          search_query?: unknown;
+        };
+        const query = sanitizeSearchQuery(
+          typeof args.query === "string"
+            ? args.query
+            : typeof args.search_query === "string"
+              ? args.search_query
+              : "",
+        );
+        const key = query.toLowerCase().replace(/\\s+/g, " ").trim();
+        if (!key || seenSearchQueries.has(key)) {
+          if (key) repeatedSearchQuery = true;
+          return false;
+        }
+        seenSearchQueries.set(key, []);
+        return true;
+      } catch {
+        return false;
+      }
+    });
+    if (searchCalls.length > 0 && novelSearchCalls.length === 0) {
+      toolCall = null;
+      break;
+    }
+           if (
+      searches.length >= MAX_WEB_SEARCH_CALLS ||
+      searchCalls.length > MAX_WEB_SEARCH_CALLS - searches.length
+    ) {
+      fallbackToolCalls = searchCalls;
+      toolCall = fallbackToolCalls[0] ?? null;
+      break;
+    }
     const searchResults = await Promise.all(
-      searchCalls.map(async (call, index) => {
+      novelSearchCalls.map(async (call, index) => {
         let args: Record<string, unknown> = {};
         try {
           const parsedArgs: unknown = JSON.parse(call.function.arguments);
@@ -1235,6 +1462,7 @@ responses.post("/v1/responses", async (c) => {
             query: "",
             count: 0,
             results: [] as WebSearchResult[],
+            duplicate: false,
           };
         }
         if (
@@ -1247,6 +1475,7 @@ responses.post("/v1/responses", async (c) => {
             query: "",
             count: 0,
             results: [] as WebSearchResult[],
+            duplicate: false,
           };
         }
         const query = sanitizeSearchQuery(
@@ -1254,6 +1483,8 @@ responses.post("/v1/responses", async (c) => {
             ? args.query
             : (args.search_query as string),
         );
+        const queryKey = query.toLowerCase().replace(/\s+/g, " ").trim();
+        if (!seenSearchQueries.has(queryKey)) seenSearchQueries.set(queryKey, []);
         const requestedCount = Number(args.max_results);
         const count = Number.isFinite(requestedCount)
           ? Math.min(
@@ -1293,11 +1524,16 @@ responses.post("/v1/responses", async (c) => {
         if (results.length === 0 && clientSearchTools.length !== 1) {
           results = await webSearch(query, { count, provider: "fallback" });
         }
-        return { call, query, count, results };
+                       seenSearchQueries.set(queryKey, results);
+        return { call, query, count, results, duplicate: false };
       }),
     );
 
     for (const item of searchResults) {
+      if (item.duplicate) {
+        repeatedSearchQuery = true;
+        continue;
+      }
       if (item.results.length === 0) {
         const fallbackTools =
           clientSearchTools.length === 1 ? clientSearchTools : [item.call];
@@ -1335,14 +1571,16 @@ responses.post("/v1/responses", async (c) => {
       toolGate = { calls: fallbackToolCalls, rejections: [] };
       break;
     }
-    // Search results are now available; expose fetch/scrape on the next
-    // upstream turn so Luna can read the selected result pages.
+    if (clientCalls.length > 0) {
+      // Hosted discovery finished; hand remaining client tools (docx/edit/etc.) back.
+      toolCall = clientCalls[0] ?? null;
+      toolGate = { calls: clientCalls, rejections: [] };
+      break;
+    }
     if (searchResults.length > 0) {
-      // Search results are already in the conversation. Suppress search
-      // tools on the synthesis turn, but preserve non-search follow-up tools.
       const followUpTools = tools.filter(
         (tool) =>
-          !hostedSearchNames.has(tool.function.name) && !isSearchTool(tool),
+          !hostedSearchNames.has(tool.function.name) || isSearchTool(tool),
       );
       request.tools = followUpTools.length > 0 ? followUpTools : undefined;
       request.tool_choice = followUpTools.length > 0 ? "auto" : "none";
@@ -1434,7 +1672,10 @@ responses.post("/v1/responses", async (c) => {
           "Use the tool results already above as your evidence and answer the user's original question directly. State the conclusion first, then briefly explain the supporting result(s). Do not say you cannot verify it, cannot access the web, need to search, or need more information. Do not merely list, quote, or summarize search-result snippets.",
       },
     ];
-    const retryBuilt = buildUpstreamRequest(request, model);
+    const retryBuilt = buildUpstreamRequest(request, model, {
+      chatId: promptOnly ? undefined : activeChatId ?? undefined,
+      promptOnly,
+    });
     const retry = await fetch(
       endpointUrl(retryBuilt.endpoint, c.env.UPSTREAM_CHAT_URL),
       {
@@ -1446,14 +1687,26 @@ responses.post("/v1/responses", async (c) => {
     );
     if (retry.ok && retry.body) {
       const retryParsed = await collectUpstream(retry.body);
+      activeChatId = retryParsed.chatId ?? activeChatId;
+      await saveCachedChatId(c.env.CHAT_CACHE, cacheKey, activeChatId);
       const retryText = removeRelayProtocolLeak(
         extractResponsesText(retryParsed.content),
       ).trim();
 
-      const retryCall = toolsRequested
-        ? tryParseRelayToolCall(retryText, request.tools)
-        : null;
-      if (retryText && !retryCall && !declinedToolUse(retryText)) {
+      const retryGate = toolsRequested
+        ? gateToolCalls(retryText, request.tools)
+        : { calls: [] as ToolCallGateResult["calls"], rejections: [] as string[] };
+      if (retryGate.calls.length > 0 && retryGate.rejections.length === 0) {
+        rawContent = retryText;
+        citations = retryParsed.citations;
+        parsedContent = retryParsed;
+        toolGate = retryGate;
+        toolCall = retryGate.calls[0] ?? null;
+      } else if (
+        retryText &&
+        !retryGate.calls.length &&
+        !declinedToolUse(retryText)
+      ) {
         rawContent = retryText;
         citations = retryParsed.citations;
         parsedContent = retryParsed;
@@ -1479,7 +1732,10 @@ responses.post("/v1/responses", async (c) => {
       },
     ];
     try {
-      const retryBuilt = buildUpstreamRequest(request, model);
+      const retryBuilt = buildUpstreamRequest(request, model, {
+        chatId: promptOnly ? undefined : activeChatId ?? undefined,
+        promptOnly,
+      });
       const retry = await fetch(
         endpointUrl(retryBuilt.endpoint, c.env.UPSTREAM_CHAT_URL),
         {
@@ -1491,6 +1747,8 @@ responses.post("/v1/responses", async (c) => {
       );
       if (retry.ok && retry.body) {
         const retryParsed = await collectUpstream(retry.body);
+        activeChatId = retryParsed.chatId ?? activeChatId;
+        await saveCachedChatId(c.env.CHAT_CACHE, cacheKey, activeChatId);
         const retryText = removeRelayProtocolLeak(
           extractResponsesText(retryParsed.content),
         );
@@ -1519,8 +1777,8 @@ responses.post("/v1/responses", async (c) => {
   // a failed tool turn and shows "retry 1/5".
   if (!toolCall) rawContent = stripToolCallMarkup(rawContent);
 
-  const reasoningContent = "";
   let split = splitReasoningContent(rawContent);
+  let reasoningContent = split.reasoningContent;
   let visibleContent = split.content;
   if (!visibleContent.trim() && !toolCall) {
     if (toolsRequested && toolGate.rejections.length > 0) {
@@ -1530,14 +1788,17 @@ responses.post("/v1/responses", async (c) => {
         "The previous tool call was invalid and was not executed. Please retry with a complete tool call block and valid JSON params.";
       split = splitReasoningContent(rawContent);
       visibleContent = split.content;
+      reasoningContent = split.reasoningContent;
     } else if (request.messages.some((message) => message.role === "tool")) {
       rawContent = "I could not produce a final answer from the tool results.";
       split = splitReasoningContent(rawContent);
       visibleContent = split.content;
+      reasoningContent = split.reasoningContent;
     } else {
       rawContent = "I could not produce a visible answer.";
       split = splitReasoningContent(rawContent);
       visibleContent = split.content;
+      reasoningContent = split.reasoningContent;
     }
   }
   // Final belt-and-suspenders: if somehow markup survived, strip before output.
@@ -1586,6 +1847,15 @@ responses.post("/v1/responses", async (c) => {
   const result = searches.length
     ? addHostedWebSearches(resultWithCitations, searches)
     : resultWithCitations;
+  if (activeChatId) {
+    const responseCacheKey = await chatCacheKey(
+      sessionToken,
+      model.id,
+      c.env.CF_VERSION_METADATA?.id ?? "local",
+      result.id,
+    );
+    await saveCachedChatId(c.env.CHAT_CACHE, responseCacheKey, activeChatId);
+  }
   const responseToolCall = fallbackToolCalls[0] ?? toolCall;
   if (fallbackToolCalls.length > 0) {
     if (raw.stream) {

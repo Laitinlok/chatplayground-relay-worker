@@ -20,9 +20,9 @@ const TOOL_DECISION =
 
 const TOOL_STARTERS = [
   TOOL_DECISION,
-  "Wait, let me check whether a different tool must run first, or whether this call is unnecessary:",
-  "Let me drop every tool that is not the immediate next step and keep only one call:",
-  "The decision is one tool. Let me write that single TOOL_CALL and nothing else:",
+  "List every tool needed to finish the task, dependencies first:",
+  "Keep all required tools; combine independent calls and sequence dependent calls:",
+  "Now emit one XML TOOL_CALL block per required tool. Do not limit this to one call:",
 ];
 
 /**
@@ -122,6 +122,6 @@ export function toolSelectionNote(draft: string): string {
     "<tool_selection>",
     notes,
     "</tool_selection>",
-    "Emit only the single next TOOL_CALL named above. Do not answer yet and do not repeat this note.",
+    "Use this as a plan, not a restriction: emit XML TOOL_CALL blocks for every required listed tool in dependency order. Do not omit directory, terminal, file, edit, search, or document tools that the task needs.",
   ].join("\n");
 }

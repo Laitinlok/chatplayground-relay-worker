@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   needsCurrentWebSearch,
+  focusSearchQuery,
   sanitizeSearchQuery,
 } from "../src/utils/search-query";
 
@@ -27,5 +28,15 @@ describe("sanitizeSearchQuery", () => {
     expect(needsCurrentWebSearch("Explain how binary search works.")).toBe(
       false,
     );
+  });
+});
+
+describe("focusSearchQuery", () => {
+  it("drops the document-creation instruction and keeps the topic", () => {
+    expect(
+      focusSearchQuery(
+        "please create a document file for the topic of latest TikTok food hacks",
+      ),
+    ).toBe("latest TikTok food hacks");
   });
 });

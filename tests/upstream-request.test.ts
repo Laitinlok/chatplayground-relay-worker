@@ -6,7 +6,7 @@ import {
   buildUpstreamHeaders,
   buildUpstreamRequest,
   endpointUrl,
-  requiresNewPromptOnly,
+  formatHistoryText,
 } from "../src/utils/upstream-request";
 
 const AZURE_MODEL: ModelEntry = {
@@ -57,7 +57,115 @@ const LMSYS_MODEL: ModelEntry = {
 
 const AZURE_BASE_URL = "https://app.chatplayground.ai/api/chat/azure";
 
+describe("formatHistoryText", () => {
+  it("tags user turns and model responses, retaining tool results", () => {
+    expect(
+      formatHistoryText([
+        { role: "user", content: "Latest TikTok food hacks" },
+        { role: "assistant", content: "Here are some ideas." },
+        { role: "tool", name: "web_search", tool_call_id: "call_1", content: "Found three results." },
+        { role: "system", content: "Do not include system messages." },
+      ]),
+    ).toBe(
+      `<USER>\nLatest TikTok food hacks\n</USER>\n\n` +
+        `<RESPONSE>\nHere are some ideas.\n</RESPONSE>\n\n` +
+        `<TOOL_RESULT>\nFound three results.\n</TOOL_RESULT>`,
+    );
+  });
+});
+
 describe("buildUpstreamRequest — field mapping", () => {
+  it("preserves assistant tool instructions after agent search results", () => {
+    const { body } = buildUpstreamRequest(
+      {
+        model: "gpt-agent",
+        tools: [
+          {
+            type: "function",
+            function: {
+              name: "web_search",
+              parameters: {
+                type: "object",
+                properties: { query: { type: "string" } },
+              },
+            },
+          },
+        ],
+        tool_choice: "auto",
+        messages: [
+          { role: "user", content: "Find the latest release." },
+          {
+            role: "assistant",
+            content: null,
+            tool_calls: [
+              {
+                id: "call_search",
+                type: "function",
+                function: {
+                  name: "web_search",
+                  arguments: '{"query":"latest release"}',
+                },
+              },
+            ],
+          },
+          {
+            role: "tool",
+            name: "web_search",
+            content: "Release 3.2",
+          },
+        ],
+      },
+      AGENT_MODEL,
+    );
+
+    expect(body.messages[0]?.content).toContain("Find the latest release.");
+    expect(body.messages[0]?.content).toContain("<TOOL_RESULT>");
+    expect(body.messages[0]?.content).toContain("<TOOL_CALL>");
+    expect(body.messages[0]?.content).toContain("web_search");
+  });
+
+  it("reasserts caller system instructions after tool results", () => {
+    const { body } = buildUpstreamRequest(
+      {
+        model: "gpt-agent",
+        messages: [
+          { role: "system", content: "Answer in exactly two bullet points." },
+          { role: "user", content: "Summarize the search." },
+          { role: "tool", name: "web_search", content: "Result A; Result B" },
+        ],
+        tools: [{ type: "function", function: { name: "web_search" } }],
+      },
+      AGENT_MODEL,
+    );
+    const transcript = String(body.messages[0]?.content);
+    expect(transcript).toContain("Caller instructions (highest priority");
+    expect(transcript).toContain("Answer in exactly two bullet points.");
+    expect(transcript).toContain("Use every <TOOL_RESULT>");
+  });
+
+  it("folds full history for agent models and ignores the OpenAI user id", () => {
+    const { body } = buildUpstreamRequest(
+      {
+        model: "gpt-agent",
+        user: "client-chat-id",
+        messages: [
+          { role: "system", content: "Follow these rules." },
+          { role: "user", content: "Previous question" },
+          { role: "assistant", content: "Previous answer" },
+          { role: "user", content: "Current question" },
+        ],
+      },
+      AGENT_MODEL,
+    );
+    expect(body.messages).toHaveLength(1);
+    expect(body.messages[0]?.content).toContain("System: Follow these rules.");
+    expect(body.messages[0]?.content).toContain("User: Previous question");
+    expect(body.messages[0]?.content).toContain("Draft so far (do not repeat it):");
+    expect(body.messages[0]?.content).toContain("Previous answer");
+    expect(body.messages[0]?.content).toContain("User: Current question");
+    expect(body.chatId).toBe("");
+  });
+
   it("keeps current-turn tool results when continuing an agent prompt", () => {
     const { body } = buildUpstreamRequest(
       {
@@ -98,16 +206,16 @@ describe("buildUpstreamRequest — field mapping", () => {
     );
     expect(body.messages[0]?.content).toContain("<TOOL_RESULT>");
     expect(body.messages[0]?.content).toContain("Release 3.2");
-    expect(body.messages[0]?.content).not.toContain("<TOOL_CALL>");
+    expect(body.messages[0]?.content).toContain("<TOOL_CALL>");
   });
 
-  it("sends only the latest user prompt to agent models", () => {
+  it("folds conversation history for agent models and ignores OpenAI user ids", () => {
     const { body } = buildUpstreamRequest(
       {
         model: "gpt-agent",
         user: "client-chat-id",
         messages: [
-          { role: "system", content: "System instructions stay client-side." },
+          { role: "system", content: "System instructions." },
           { role: "user", content: "Previous question" },
           { role: "assistant", content: "Previous answer" },
           { role: "user", content: "Current prompt" },
@@ -116,14 +224,17 @@ describe("buildUpstreamRequest — field mapping", () => {
       AGENT_MODEL,
     );
 
-    expect(body.messages).toEqual([
-      { role: "user", content: "Current prompt" },
-    ]);
-    expect(body.chatId).toBe("client-chat-id");
+    const transcript = String(body.messages[0]?.content);
+    expect(transcript).toContain("System: System instructions.");
+    expect(transcript).toContain("User: Previous question");
+    expect(transcript).toContain("Draft so far (do not repeat it):");
+    expect(transcript).toContain("Previous answer");
+    expect(transcript).toContain("User: Current prompt");
+    expect(body.chatId).toBe("");
     expect(body.noSave).toBe(true);
   });
 
-  it("sends only the latest user prompt and keeps Luna noSave enabled", () => {
+  it("folds history and keeps Luna noSave enabled", () => {
     const { body } = buildUpstreamRequest(
       {
         model: "gpt-6-luna",
@@ -136,19 +247,43 @@ describe("buildUpstreamRequest — field mapping", () => {
       LUNA_MODEL,
     );
 
-    expect(body.messages).toEqual([
-      {
-        role: "user",
-        content:
-          "User: hello\n\nDraft so far (do not repeat it):\nHi!\n\nUser: what is an API",
-      },
-    ]);
+    expect(body.messages).toHaveLength(1);
+    const transcript = String(body.messages[0]?.content);
+    expect(transcript).toContain("User: hello");
+    expect(transcript).toContain("Draft so far (do not repeat it):\nHi!");
+    expect(transcript).toContain("User: what is an API");
     expect(body.chatId).toBe("");
     expect(body.noSave).toBe(true);
     expect(body.submissionId).toMatch(/^[0-9a-f-]{36}$/i);
   });
 
-  it("sends only the new user prompt when resuming an upstream chat", () => {
+  it("sends only the current user/tool turn when resuming a cached chat", () => {
+    const { body } = buildUpstreamRequest(
+      {
+        model: "gpt-5.5",
+        messages: [
+          { role: "system", content: "Keep these instructions." },
+          { role: "user", content: "old prompt" },
+          { role: "assistant", content: "old answer" },
+          { role: "user", content: "new prompt" },
+          { role: "assistant", content: null, tool_calls: [{ id: "call_1", type: "function", function: { name: "search", arguments: "{}" } }] },
+          { role: "tool", name: "search", tool_call_id: "call_1", content: "result" },
+        ],
+      },
+      AZURE_MODEL,
+      { chatId: "c123456789012345678901", contextFilesOnly: true },
+    );
+    expect(body.chatId).toBe("c123456789012345678901");
+    const transcript = String(body.messages[0]?.content);
+    expect(transcript).toContain("Read tools.txt only for tool names and schemas");
+    expect(transcript).toContain("Read history.txt only as conversation context");
+    expect(transcript).toContain("new prompt");
+    expect(transcript).toContain("<TOOL_RESULT>");
+    expect(transcript).not.toContain("old answer");
+    expect(transcript).not.toContain("old prompt");
+  });
+
+  it("folds history and does not resume an upstream chat from user id", () => {
     const { body } = buildUpstreamRequest(
       {
         model: "gpt-5.5",
@@ -162,10 +297,10 @@ describe("buildUpstreamRequest — field mapping", () => {
       AZURE_MODEL,
     );
 
-    expect(body.messages).toEqual([
-      { role: "user", content: "what is an API" },
-    ]);
-    expect(body.chatId).toBe("cmvjv8i7d002pl708e4uhhyyh");
+    expect(body.messages).toHaveLength(1);
+    expect(body.messages[0]?.content).toContain("User: hello");
+    expect(body.messages[0]?.content).toContain("User: what is an API");
+    expect(body.chatId).toBe("");
   });
 
   it("defaults to noSave=true and empty chatId", () => {
@@ -185,9 +320,43 @@ describe("buildUpstreamRequest — field mapping", () => {
       AZURE_MODEL,
     );
     expect(body.messages).toHaveLength(1);
-    expect(body.messages[0]?.content).toHaveLength(15_000);
+    expect(body.messages[0]?.content).toHaveLength(12_000);
     expect(body.messages[0]?.content).toContain("earlier context omitted");
     expect(body.messages[0]?.content).toContain(content.slice(-100));
+  });
+
+  it("puts the user request before injected tool instructions", () => {
+    const { body } = buildUpstreamRequest(
+      {
+        model: "gpt-5.5",
+        messages: [
+          {
+            role: "system",
+            content: `[relay-tool-prompt-v1]\n=== TOOL POLICY ===\n${"tool rules ".repeat(700)}\n</AVAILABLE_TOOLS>`,
+          },
+          { role: "user", content: "Latest TikTok food hacks" },
+        ],
+      },
+      AZURE_MODEL,
+    );
+    const content = String(body.messages[0]?.content);
+    expect(content.indexOf("Latest TikTok food hacks")).toBeLessThan(
+      content.indexOf("System:"),
+    );
+    expect(content).toContain("Latest TikTok food hacks");
+  });
+
+  it("caps oversized tool-policy prompts at the upstream message limit", () => {
+    const content = `System rules\n=== TOOL POLICY ===\n${"tool schema ".repeat(2_000)}\n</AVAILABLE_TOOLS>\nUser: inspect the project`;
+    const { body } = buildUpstreamRequest(
+      { model: "gpt-5.5", messages: [{ role: "user", content }] },
+      AZURE_MODEL,
+    );
+    const message = body.messages[0]?.content;
+    expect(typeof message).toBe("string");
+    expect((message as string).length).toBeLessThanOrEqual(12_000);
+    expect(message).toContain("User: inspect the project");
+    expect(message).toContain("earlier context omitted");
   });
 
   it("folds developer history into a user message and omits null assistant content", () => {
@@ -302,8 +471,8 @@ describe("buildUpstreamRequest — field mapping", () => {
     const systemNotes = body.messages
       .map((message) => String(message.content))
       .join("\n");
-    expect(systemNotes).toContain("System: A <TOOL_RESULT> is above.");
-    expect(systemNotes).toContain("edit/write/replace tool is still needed");
+    expect(systemNotes).toContain("If another tool is still needed");
+    expect(systemNotes).toContain("<TOOL_CALL> XML");
     expect(systemNotes).not.toMatch(/Do not announce another search/i);
   });
 
@@ -322,10 +491,8 @@ describe("buildUpstreamRequest — field mapping", () => {
     const transcript = body.messages
       .map((message) => String(message.content))
       .join("\n");
-    expect(transcript).toContain("System:");
-    expect(transcript).toContain(
-      "If an edit/write/replace tool is still needed",
-    );
+    expect(transcript).toContain("<TOOL_RESULT>");
+    expect(transcript).toContain("Use this result to advance the original task.");
     expect(transcript).not.toContain("Do not announce another search");
   });
 
@@ -381,7 +548,7 @@ describe("buildUpstreamRequest — field mapping", () => {
     expect(body).toMatchObject({ reasoning_effort: "high", verbosity: "low" });
   });
 
-  it("maps metadata.save -> !noSave and user -> chatId", () => {
+  it("maps metadata.save -> !noSave and leaves chatId stateless", () => {
     const { body } = buildUpstreamRequest(
       {
         model: "gpt-5.5",
@@ -392,7 +559,7 @@ describe("buildUpstreamRequest — field mapping", () => {
       AZURE_MODEL,
     );
     expect(body.noSave).toBe(false);
-    expect(body.chatId).toBe("ck_existing_chat_id");
+    expect(body.chatId).toBe("");
   });
 });
 
@@ -455,13 +622,6 @@ describe("toEndpoint", () => {
   it("defaults unknown endpoint values to lmsys", () => {
     expect(toEndpoint("something-new")).toBe("lmsys");
     expect(toEndpoint("")).toBe("lmsys");
-  });
-});
-
-describe("requiresNewPromptOnly", () => {
-  it("treats Grok models as prompt-only agents", () => {
-    const grok = { ...AZURE_MODEL, id: "xai/grok-4.7", modelName: "grok-4.7" };
-    expect(requiresNewPromptOnly(grok)).toBe(true);
   });
 });
 

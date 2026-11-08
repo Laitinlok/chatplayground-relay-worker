@@ -3,12 +3,27 @@ import type { ModelEntry } from "../constants/models";
 import { DISCOVERY_TIMEOUT } from "../constants/timeouts";
 import { OpenAIHTTPError } from "./errors";
 const CACHE_KEY = "models:v5"; // v5: included image models
+const STALE_CACHE_KEY = "models:v5:stale";
 const KV_TTL_S = 60 * 60; // 1 hour
+const STALE_KV_TTL_S = 7 * 24 * 60 * 60; // outage fallback only
 const MEM_TTL_MS = 5 * 60 * 1000; // 5 min in-isolate cache
+const DISCOVERY_ATTEMPTS = 3;
 
 // Per-isolate memory cache. Survives across requests on a warm isolate
 // and saves a KV roundtrip. Safe because the registry is shared truth.
 let memCache: { at: number; data: ModelEntry[] } | null = null;
+
+export class ModelDiscoveryError extends OpenAIHTTPError {
+  constructor() {
+    super(
+      503,
+      "Model registry unavailable: could not reach the upstream /api/models feed.",
+      "upstream_error",
+      "model_discovery_failed",
+    );
+    this.name = "ModelDiscoveryError";
+  }
+}
 
 export interface DiscoveryEnv {
   UPSTREAM_CHAT_URL: string;
@@ -33,28 +48,35 @@ export async function getModels(env: DiscoveryEnv): Promise<ModelEntry[]> {
     if (fresh.length === 0)
       throw new Error("no chat models in /api/models feed");
     if (env.MODEL_CACHE) {
- try {
- await env.MODEL_CACHE.put(CACHE_KEY, JSON.stringify(fresh), {
- expirationTtl: KV_TTL_S,
- });
- } catch (err) {
- // A cache write failure should not turn successful discovery into an error.
- console.error("Model cache write failed.", err);
- }
- }
- memCache = { at: Date.now(), data: fresh };
+      const encoded = JSON.stringify(fresh);
+      try {
+        await env.MODEL_CACHE.put(CACHE_KEY, encoded, {
+          expirationTtl: KV_TTL_S,
+        });
+        await env.MODEL_CACHE.put(STALE_CACHE_KEY, encoded, {
+          expirationTtl: STALE_KV_TTL_S,
+        });
+      } catch (err) {
+        // A cache write failure should not turn successful discovery into an error.
+        console.error("Model cache write failed.", err);
+      }
+    }
+    memCache = { at: Date.now(), data: fresh };
     return fresh;
   } catch (err) {
-    // No fallback list on purpose. Serving a stale hardcoded registry turned
-    // "discovery is down" into a 404 model_not_found, which tells callers the
-    // model doesn't exist when it does. 503 is the honest, retryable answer.
+    const stale = env.MODEL_CACHE
+      ? await env.MODEL_CACHE.get<ModelEntry[]>(STALE_CACHE_KEY, "json").catch(
+          () => null,
+        )
+      : null;
+    if (stale && stale.length > 0) {
+      console.error("Model discovery failed; using last-known registry.", err);
+      memCache = { at: Date.now(), data: stale };
+      return stale;
+    }
+    // No hardcoded fallback: an invented list turns an outage into false 404s.
     console.error("Model discovery failed.", err);
-    throw new OpenAIHTTPError(
-      503,
-      "Model registry unavailable: could not reach the upstream /api/models feed.",
-      "upstream_error",
-      "model_discovery_failed",
-    );
+    throw new ModelDiscoveryError();
   }
 }
 
@@ -80,6 +102,20 @@ async function discover(chatUrl: string): Promise<ModelEntry[]> {
   //
   // /api/chat/azure → /api/models (sibling under /api/)
   const url = new URL("../models", chatUrl);
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= DISCOVERY_ATTEMPTS; attempt++) {
+    try {
+      return await discoverOnce(url);
+    } catch (err) {
+      lastError = err;
+      if (attempt === DISCOVERY_ATTEMPTS) break;
+      await new Promise((resolve) => setTimeout(resolve, 250 * attempt));
+    }
+  }
+  throw lastError;
+}
+
+async function discoverOnce(url: URL): Promise<ModelEntry[]> {
   const res = await fetch(url, {
     headers: { accept: "application/json" },
     signal: AbortSignal.timeout(DISCOVERY_TIMEOUT),

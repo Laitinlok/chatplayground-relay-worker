@@ -33,10 +33,8 @@ export interface Env {
   // Admin portal access restriction. Configure this alongside Cloudflare Access.
   ADMIN_ALLOWED_EMAIL?: string;
 
-  // KV binding (optional — without it every cold isolate refetches the model
-  // feed, and a discovery failure surfaces as a 503)
+  // KV bindings: MODEL_CACHE for discovery; CHAT_CACHE for images/embeddings.
   MODEL_CACHE?: KVNamespace;
-  // Chat-session cache (optional — enables upstream chat continuity).
   CHAT_CACHE?: KVNamespace;
  CF_VERSION_METADATA?: { id: string; tag?: string; timestamp?: string };
   // Cloudflare Workers AI binding for embeddings & AI models.

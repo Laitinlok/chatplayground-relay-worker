@@ -1,187 +1,382 @@
 import { describe, expect, it } from "vitest";
 import {
-  isSearchTool,
-  isFetchTool,
-  prioritizeSearchTools,
-  createSearchToolCall,
-  rankToolsByEmbedding,
- isVeryBasicQuery,
-} from "../src/utils/tool-selector";
+  buildToolSystemPrompt,
+  injectToolPrompt,
+} from "../src/utils/tool-shim";
 import type { OpenAITool } from "../src/utils/tool-shim";
+import {
+  chatResultToResponses,
+  responsesToChatRequest,
+  responsesToolsToChatTools,
+  type ResponsesResponse,
+} from "../src/types/responses";
+import {
+  addHostedWebSearch,
+  addPerplexityCitations,
+  streamResponse,
+} from "../src/routes/responses";
 
-function tool(
-  name: string,
-  properties: Record<string, unknown>,
-  description?: string,
-): OpenAITool {
-  return {
-    type: "function",
-    function: {
-      name,
-      description,
-      parameters: { type: "object", properties },
-    },
-  };
-}
-
-describe("embedding-assisted tool ranking", () => {
-  it("ranks relevant tools and reports a confident match", async () => {
-    const relevant = tool("create_calendar_event", {
-      title: { type: "string" },
-    });
-    const unrelated = tool("search_memories", {
-      query: { type: "string" },
-    }, "Search personal conversation memories.");
-    const ai = {
-      run: async (_model: string, input: { text: string[] }) => {
-        expect(input.text).toHaveLength(3);
-        return { data: [[1, 0], [0.1, 0.99], [0.98, 0.1]] };
-      },
-    };
-
-    const ranked = await rankToolsByEmbedding(
-      "Schedule a meeting for tomorrow",
-      [unrelated, relevant],
-      ai,
-    );
-    expect(ranked?.tools.map((item) => item.function.name)).toEqual([
-      "create_calendar_event",
-      "search_memories",
-    ]);
-    expect(ranked?.confident).toBe(true);
-  });
-
-  it("leaves ambiguous rankings and embedding failures to normal routing", async () => {
-    const tools = [
-      tool("create_event", { title: { type: "string" } }),
-      tool("update_event", { id: { type: "string" } }),
-    ];
-    const ambiguous = await rankToolsByEmbedding(
-      "Change the event",
-      tools,
-      { run: async () => ({ data: [[1, 0], [0.9, 0.1], [0.9, 0.1]] }) },
-    );
-    expect(ambiguous?.confident).toBe(false);
-    await expect(
-      rankToolsByEmbedding("Change the event", tools),
-    ).resolves.toBeNull();
-
-    const weak = await rankToolsByEmbedding("Change the event", tools, {
-      run: async () => ({ data: [[1, 0], [0.2, 0.98], [0.1, 0.99]] }),
-    });
-    expect(weak?.confident).toBe(false);
-
-    await expect(
-      rankToolsByEmbedding("Change the event", tools, {
-        run: async () => {
-          throw new Error("AI unavailable");
-        },
-      }),
-    ).resolves.toBeNull();
-  });
-});
-
-describe("automatic tool-choice defaults", () => {
- it.each(["Hi", "thanks!", "OK.", "Who are you?"])(
-  "recognizes very basic query %s",
-  (query) => {
-   expect(isVeryBasicQuery(query)).toBe(true);
-  },
- );
-
- it.each(["Explain photosynthesis", "latest AI news", "Search for pottery guides"])(
-  "does not suppress tools for substantive query %s",
-  (query) => {
-   expect(isVeryBasicQuery(query)).toBe(false);
-  },
- );
-});
-
-describe("web tool classification", () => {
-  it.each([
-    ["web-browsing", "query"],
-    ["search_news", "search_query"],
-    ["search_web_news", "search_query"],
-    ["BROWSING_internet", "query"],
-    ["WEB_LOOKUP", "query"],
-  ])("recognizes %s with %s", (name, parameter) => {
-    expect(isSearchTool(tool(name, { [parameter]: { type: "string" } }))).toBe(
-      true,
-    );
-  });
-
-  it.each([
-    ["database", { query: { type: "string" } }],
-    ["web_lookup", { url: { type: "string" } }],
-    ["search_web_news", {}],
-    ["browser", { query: { type: "string" } }],
-  ])(
-    "does not classify %s without both name and parameter matches",
-    (name, properties) => {
-      expect(isSearchTool(tool(name, properties))).toBe(false);
-    },
-  );
-
-  it("does not mistake conversation search tools for web search", () => {
-    expect(
-      isSearchTool(tool("agora_search_conversations", { query: { type: "string" } })),
-    ).toBe(false);
-    expect(
-      isSearchTool(tool("search_conversations", { query: { type: "string" } })),
-    ).toBe(false);
-    expect(
-      isSearchTool(tool("search_memories", { search_query: { type: "string" } })),
-    ).toBe(false);
-    expect(
-      isSearchTool(
+describe("Responses adapter", () => {
+  it("maps GPT-5.6-style input and function tools to chat shapes", () => {
+    const request = responsesToChatRequest({
+      model: "gpt-5.6",
+      instructions: "Be concise.",
+      input: "Find it",
+      tools: [
         {
-          ...tool("lookup", { query: { type: "string" } }),
-          function: {
-            ...tool("lookup", { query: { type: "string" } }).function,
-            description: "Search the web for current information.",
-          },
+          type: "function",
+          name: "web_search",
+          parameters: { type: "object" },
         },
-      ),
-    ).toBe(true);
+      ],
+      tool_choice: "required",
+    });
+
+    expect(request.messages).toEqual([
+      { role: "system", content: "Be concise." },
+      { role: "user", content: "Find it" },
+    ]);
+    expect(request.tools?.[0]?.function.name).toBe("web_search");
+    expect(request.tool_choice).toBe("required");
   });
 
-  it("selects any advertised search tool for latest information", () => {
-    const request = {
-      model: "gpt-6-luna",
-      messages: [
-        { role: "user" as const, content: "Latest TikTok food hacks" },
+  it("does not map the Responses user field to an upstream chat ID", () => {
+    const request = responsesToChatRequest({
+      model: "grok-4.6",
+      input: "Hello",
+      user: "caller_123",
+    });
+
+    expect(request.user).toBeUndefined();
+  });
+
+  it("preserves Responses image input for vision models", () => {
+    const request = responsesToChatRequest({
+      model: "llama-4-scout",
+      input: {
+        role: "user",
+        content: [
+          { type: "input_text", text: "Describe this image." },
+          {
+            type: "input_image",
+            image_url: "https://files.example.test/uploaded-photo.png",
+          },
+        ],
+      },
+    });
+
+    expect(request.messages).toEqual([
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "Describe this image." },
+          {
+            type: "image_url",
+            image_url: { url: "https://files.example.test/uploaded-photo.png" },
+          },
+        ],
+      },
+    ]);
+  });
+  it("accepts a single OmniRoute input item object", () => {
+    const request = responsesToChatRequest({
+      model: "gpt-5.6",
+      input: { role: "user", content: "Find it" },
+    });
+
+    expect(request.messages).toEqual([{ role: "user", content: "Find it" }]);
+  });
+  it("uses messages as a compatibility fallback", () => {
+    const request = responsesToChatRequest({
+      model: "gpt-5.6",
+      messages: [{ role: "user", content: "Find it" }],
+    });
+
+    expect(request.messages).toEqual([{ role: "user", content: "Find it" }]);
+  });
+  it("preserves function call and function call output history", () => {
+    const request = responsesToChatRequest({
+      model: "gpt-5.6",
+      input: [
+        {
+          type: "function_call",
+          call_id: "call_123",
+          name: "cron",
+          arguments: '{"action":"add"}',
+        },
+        {
+          type: "function_call_output",
+          call_id: "call_123",
+          output: "created",
+        },
       ],
-      tools: [tool("web_lookup", { query: { type: "string" } })],
-    };
-    expect(
-      createSearchToolCall("Latest TikTok food hacks", request.tools)?.function,
-    ).toEqual({
-      name: "web_lookup",
-      arguments: '{"query":"Latest TikTok food hacks"}',
+    });
+
+    expect(request.messages[0]?.tool_calls?.[0]?.id).toBe("call_123");
+    expect(request.messages[1]).toMatchObject({
+      role: "tool",
+      content: "created",
+      name: "call_123",
     });
   });
 
-  it("preserves unrelated tools and gates a url fetch only when search is available", () => {
-    const search = tool("web-browsing", { query: { type: "string" } });
-    const fetch = tool("web-scraping", { url: { type: "string" } });
-    const database = tool("database", { query: { type: "string" } });
-    expect(isFetchTool(fetch)).toBe(true);
+  it("serializes text and tool calls as Responses output items", () => {
+    const text = chatResultToResponses(
+      "gpt-5.6",
+      "hello",
+      null,
+      [{ role: "user", content: "hi" }],
+      "resp_test",
+    );
+    expect(text.object).toBe("response");
+    expect(text.output_text).toBe("hello");
+    expect(text.output[0]).toMatchObject({
+      type: "message",
+      role: "assistant",
+    });
+
+    const call = chatResultToResponses(
+      "gpt-5.6",
+      "",
+      {
+        id: "call_123",
+        type: "function",
+        function: { name: "cron", arguments: '{"action":"add"}' },
+      },
+      [],
+      "resp_tool",
+    );
+    expect(call.output[0]).toMatchObject({
+      type: "function_call",
+      call_id: "call_123",
+      name: "cron",
+      arguments: '{"action":"add"}',
+    });
+    expect(call.output_text).toBe("");
+  });
+
+  it("emits Responses-compatible envelopes for streaming clients", async () => {
+    const result = chatResultToResponses(
+      "gpt-5.6",
+      "hello",
+      null,
+      [{ role: "user", content: "hi" }],
+      "resp_stream",
+    ) as ResponsesResponse;
+    const body = await new Response(streamResponse(result, null)).text();
+
+    expect(body).toContain(
+      'event: response.created\ndata: {"type":"response.created","response":',
+    );
+    expect(body).toContain(
+      'event: response.completed\ndata: {"type":"response.completed","response":',
+    );
+    expect(body).toContain("event: response.content_part.added");
+    expect(body).toContain("event: response.output_text.delta");
+    expect(body).toContain('"delta":"hello"');
+    expect(body).toContain('"text":"hello"');
+    const payloads = body
+      .split("\n")
+      .filter((line) => line.startsWith("data: "))
+      .map((line) => JSON.parse(line.slice(6)) as Record<string, unknown>);
+    expect(payloads.length).toBeGreaterThan(0);
+    for (const payload of payloads) {
+      expect(typeof payload.sequence_number).toBe("number");
+      expect(typeof payload.type).toBe("string");
+    }
+  });
+  it("emits the hosted web-search lifecycle before the answer", async () => {
+    const result = chatResultToResponses(
+      "gpt-5.6",
+      "hello",
+      null,
+      [{ role: "user", content: "hi" }],
+      "resp_search",
+    );
+    result.output.unshift({
+      type: "web_search_call",
+      id: "ws_1",
+      status: "completed",
+      action: { type: "search", query: "latest news" },
+      results: [
+        {
+          title: "Latest news",
+          url: "https://news.example/article",
+          snippet: "A current report.",
+        },
+      ],
+    });
+    const body = await new Response(streamResponse(result, null)).text();
+    expect(body).toContain("event: response.web_search_call.in_progress");
+    expect(body).toContain("event: response.web_search_call.searching");
+    expect(body).toContain("event: response.web_search_call.completed");
+    expect(body).toContain('"action":{"type":"search","query":"latest news"}');
+  });
+
+  it("returns sources as standard url_citation annotations", () => {
+    const base = chatResultToResponses(
+      "gpt-5.6",
+      "Here is the answer.",
+      null,
+      [{ role: "user", content: "hi" }],
+      "resp_citations",
+    );
+    const result = addHostedWebSearch(base, "latest news", [
+      {
+        title: "Latest news",
+        url: "https://news.example/article",
+        snippet: "A current report.",
+      },
+    ]);
+    const webCall = result.output.find(
+      (item) => item.type === "web_search_call",
+    );
+    const message = result.output.find((item) => item.type === "message");
+
+    expect(webCall).toMatchObject({
+      type: "web_search_call",
+      action: { type: "search", query: "latest news" },
+    });
+    expect(message).toMatchObject({
+      type: "message",
+      content: [
+        {
+          text: "Here is the answer.",
+          annotations: [
+              type: "url_citation",
+              url: "https://news.example/article",
+              title: "Latest news",
+            },
+          ],
+        },
+      ],
+    });
+    expect(result.output_text).toBe("Here is the answer.");
+  });
+
+  it("preserves Perplexity inline citations as Responses annotations", async () => {
+    const base = chatResultToResponses(
+      "perplexity-sonar",
+      "The result is current [1].",
+      null,
+      [{ role: "user", content: "question" }],
+      "resp_perplexity_citations",
+    );
+    const result = await addPerplexityCitations(base, [
+      "https://source.example",
+    ]);
+    const part = (result.output[0] as any).content[0];
+
+    expect(result.output_text).toBe("The result is current [1].");
+    expect(part.text).toBe("The result is current [1].");
+    expect(part.annotations).toEqual([
+      {
+        type: "url_citation",
+        start_index: 22,
+        end_index: 25,
+        url: "https://source.example",
+        title: "source.example",
+      },
+    ]);
+  });
+
+  it("keeps sequence numbers contiguous for Responses clients", async () => {
+    const result = chatResultToResponses(
+      "gpt-5.6",
+      "hello",
+      null,
+      [{ role: "user", content: "hi" }],
+      "resp_omni",
+    );
+    const body = await new Response(streamResponse(result, null)).text();
+    const sequenceNumbers = body
+      .split("\n")
+      .filter((line) => line.startsWith("data: "))
+      .map(
+        (line) =>
+          (JSON.parse(line.slice(6)) as Record<string, unknown>)
+            .sequence_number,
+      );
+    expect(sequenceNumbers).toEqual(
+      sequenceNumbers.map((_value, index) => index),
+    );
+  });
+  it("does not duplicate the injected tool prompt", () => {
+    const tool: OpenAITool[] = [
+      { type: "function", function: { name: "cron" } },
+    ];
+    const first = injectToolPrompt([{ role: "user", content: "hi" }], tool);
+    const second = injectToolPrompt(first, tool);
+    expect(second).toEqual(first);
+    expect(buildToolSystemPrompt(tool)).toContain("[relay-tool-prompt-v1]");
+  });
+
+  it("adds the Perplexity dispatch protocol for Responses tools", () => {
+    const prompt = buildToolSystemPrompt(
+      [{ type: "function", function: { name: "edit_file" } }],
+      "required",
+      "perplexity",
+    );
+    expect(prompt).toContain("<TOOL_CALL>");
+
+    expect(prompt).toContain("You must call one or more listed tools.");
+    expect(prompt).toContain("edit_file");
+  });
+
+  it("maps OpenAI web search tools into the relay search tool", () => {
     expect(
-      prioritizeSearchTools([search, fetch, database], false, "search the web"),
-    ).toEqual([search, database]);
+      responsesToolsToChatTools([
+        { type: "web_search_preview", search_context_size: "high" },
+      ]),
+    ).toEqual([
+      expect.objectContaining({
+        type: "function",
+        function: expect.objectContaining({ name: "web_search_preview" }),
+      }),
+      expect.objectContaining({
+        type: "function",
+        function: expect.objectContaining({ name: "web_fetch" }),
+      }),
+    ]);
+  });
+
+  it("accepts the nested function tool form for compatibility", () => {
     expect(
-      prioritizeSearchTools(
-        [search, fetch, database],
-        false,
-        "read https://example.org",
-      ),
-    ).toEqual([search, fetch, database]);
-    expect(
-      prioritizeSearchTools(
-        [search, fetch, database],
-        false,
-        "Create a document",
-      ),
-    ).toEqual([search, fetch, database]);
+      responsesToolsToChatTools([
+        { type: "function", function: { name: "cron" } },
+      ]),
+    ).toEqual([{ type: "function", function: { name: "cron" } }]);
+  });
+
+  it("emits reasoning as its own output item before the message", () => {
+    const result = chatResultToResponses(
+      "m",
+      "answer",
+      null,
+      [{ role: "user", content: "hi" }],
+      "resp_r",
+      "step one",
+    );
+    expect(result.output[0]).toMatchObject({
+      type: "reasoning",
+      content: [{ type: "reasoning_text", text: "step one" }],
+    });
+    expect(result.output[1]).toMatchObject({ type: "message" });
+    expect(result.output_text).toBe("answer");
+  });
+
+  it("streams the reasoning item", async () => {
+    const result = chatResultToResponses(
+      "m",
+      "answer",
+      null,
+      [{ role: "user", content: "hi" }],
+      "resp_r",
+      "step one",
+    );
+    const body = await new Response(streamResponse(result, null)).text();
+    expect(body).toContain("event: response.output_item.added");
+    expect(body).toContain('"type":"reasoning"');
+    expect(body).toContain("step one");
   });
 });

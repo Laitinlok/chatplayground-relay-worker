@@ -63,6 +63,37 @@ export async function bridgeInlineImages(
   }
 }
 
+export async function uploadTextAttachment(
+  content: string,
+  filename: string,
+  env: Env,
+  sessionToken: string,
+): Promise<string> {
+  const form = new FormData();
+  form.append("file", new File([content], filename, { type: "text/plain" }));
+  const response = await fetch(env.UPSTREAM_UPLOAD_URL, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${sessionToken}`,
+      origin: env.UPSTREAM_ORIGIN,
+      referer: env.UPSTREAM_REFERER,
+      accept: "*/*",
+    },
+    body: form,
+    signal: AbortSignal.timeout(UPLOAD_TIMEOUT),
+  });
+  if (!response.ok) {
+    throw upstreamError(response.status, `Failed to upload ${filename}.`);
+  }
+  const body = (await response.json().catch(() => null)) as {
+    url?: string;
+    data?: { url?: string };
+  } | null;
+  const url = body?.url ?? body?.data?.url;
+  if (!url) throw upstreamError(502, `${filename} upload returned no URL.`);
+  return url;
+}
+
 export function resetImageBridgeForTests(): void {
   // Deliberately empty: the bridge is request-scoped and has no cache.
 }

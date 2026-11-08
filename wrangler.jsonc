@@ -27,15 +27,12 @@
     // ,"PREMIUM_MODELS": "true"
   },
 
-  // Two things live here. The model registry, so a cold isolate doesn't refetch
-  // the feed. And — the reason this binding is not optional in practice — the
-  // rotated Clerk `__client` cookie: a rotation has nowhere else to persist, so
-  // without KV gateway mode dies the moment Clerk issues a replacement and the
-  // cookie has to be re-captured by hand (see utils/clerk-token.ts).
+    // Model registry, rotated Clerk cookie, images, and embedding cache.
   "kv_namespaces": [
     { "binding": "MODEL_CACHE", "id": "9b0e1c5abcb645eeb048ad452c5b0a14" },
     { "binding": "CHAT_CACHE", "id": "cf3316e58983412e8ccf54eeb7ac5204" }
   ],
+
 
   "ai": {
     "binding": "AI"

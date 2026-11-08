@@ -306,13 +306,14 @@ export function buildToolSystemPrompt(
   tools: OpenAITool[],
   toolChoice?: ToolChoice,
   _provider?: ToolShimProvider,
+  includeCatalog = true,
 ): string {
   const forcedName = toolChoiceName(toolChoice);
   const policy =
     toolChoice === "none"
       ? "Do not call a tool. Answer in plain text."
       : toolChoice === "required"
-        ? "You must call exactly one listed tool."
+        ? "You must call one or more listed tools. Emit one <TOOL_CALL> block per tool."
         : forcedName
           ? `You must call the tool named "${forcedName}".`
           : "Call a tool only when its result is required. Otherwise answer directly.";
@@ -331,27 +332,29 @@ export function buildToolSystemPrompt(
     fetchNames.length > 0
       ? `Use the listed fetch tool (${fetchNames.join(", ")}) to read a URL supplied by the user or returned by search. Do not invent web_fetch or any other tool name.`
       : "Do not invent a fetch tool.";
-  const catalog = tools
-    .map((tool) => {
-      const schema = tool.function.parameters ?? {
-        type: "object",
-        properties: {},
-      };
-      return [
-        `## ${tool.function.name}`,
-        `- description: ${tool.function.description ?? ""}`,
-        `- parameters: ${JSON.stringify(schema)}`,
-      ].join("\n");
-    })
-    .join("\n");
+  // Compact layout only. Keep every tool's full description and schema.
+  const catalog = [
+    `All ${tools.length} advertised tools; every entry is available:`,
+    ...tools.map((tool) =>
+      JSON.stringify({
+        name: tool.function.name,
+        description: tool.function.description ?? "",
+        parameters: tool.function.parameters ?? {},
+      }),
+    ),
+  ].join("\n");
 
   return [
     TOOL_PROMPT_SENTINEL,
+    "=== TOOL POLICY ===",
     "<TOOL_RULES>",
     "You MUST strictly obey the following rules:",
-    "1. Each reply is in exactly one state.",
-    "   A. Need one or more tools -> output one <TOOL_CALL> block per tool, then stop. More calls are allowed after a <TOOL_RESULT>, including edit/write/replace tools on continue turns.",
-    "   B. Task finished -> follow the caller's system instructions and answer in full from every <TOOL_RESULT> above. No tool block.",
+        "1. You may call multiple tools in one assistant turn.",
+    " A. Infer the needed capability from the task, then choose the best matching listed tool by its description and parameter schema, not by expecting an exact tool name. A generic terminal/command tool can list directories; do not require a dedicated list tool if an appropriate listed tool can do it.",
+    " B. Emit calls for all needed tools; dependent calls must wait for prior results. Search different queries when they add useful coverage; do not repeat the exact same query. The complete catalog is available; match by capability, never invent tools or parameters.",
+        " C. Task finished -> follow the caller's system instructions and answer in full from every <TOOL_RESULT> above. No tool block.",
+    " D. Never wrap a tool call in a Markdown JSON code fence. Never describe a tool call as JSON prose. Only the <TOOL_CALL> XML block is valid.",
+    " E. On turns after a <TOOL_RESULT>, continue with any listed tool still needed. Do not narrate the next step — emit XML or answer.",
     "2. Search priority:",
     `   - ${searchInstruction}`,
     `   - ${fetchInstruction}`,
@@ -359,7 +362,8 @@ export function buildToolSystemPrompt(
     "3. Forbidden:",
     "   - Do not write a <TOOL_RESULT> block. The host returns the real result next turn.",
     "   - Do not invent a tool that is not listed.",
-    "   - Do not say you will call a tool, that search is unavailable, or ask the user for a link instead of calling the listed search tool.",
+    "   - Do not say you will call a tool, pull headlines, look something up, or that search is unavailable. Do not ask the user for a link instead of calling the listed search tool.",
+    "   - Do not narrate plans like \"I'll pull...\" / \"let me search...\". If a tool is needed, emit <TOOL_CALL> immediately and stop.",
     "3. The block format is exactly:",
     "<TOOL_CALL>",
     "tool: tool_name",
@@ -372,9 +376,13 @@ export function buildToolSystemPrompt(
       ? "When the user requests image generation, treat their message as the subject brief, improve it into a polished, descriptive image prompt, then call generate_image with that improved prompt. Preserve requested subjects, style, composition, and constraints. Do not include the user's request wording such as 'please generate an image of', do not answer with a refusal or claim image generation is unavailable, and do not include transport tags or metadata."
       : "",
     "</TOOL_RULES>",
-    "<AVAILABLE_TOOLS>",
-    catalog,
-    "</AVAILABLE_TOOLS>",
+    ...(includeCatalog
+      ? ["<AVAILABLE_TOOLS>", catalog, "</AVAILABLE_TOOLS>"]
+      : [
+          "Tool schemas are attached in tools.txt. Read tools.txt before selecting or calling any tool.",
+          "For web search, use a focused query. After receiving results, do not repeat an identical query; use the results to answer or choose a distinct query only if it adds needed evidence.",
+          "Follow the caller's system instructions for the final answer.",
+        ]),
   ].join("\n");
 }
 
@@ -443,17 +451,23 @@ export function injectToolPrompt(
   tools: OpenAITool[],
   toolChoice?: ToolChoice,
   provider?: ToolShimProvider,
+  includeCatalog = true,
 ): OpenAIMessage[] {
   messages = prepareImageGenerationRequest(messages, tools);
-  const toolPrompt = buildToolSystemPrompt(tools, toolChoice, provider);
+  const toolPrompt = includeCatalog
+    ? buildToolSystemPrompt(tools, toolChoice, provider)
+    : `${TOOL_PROMPT_SENTINEL}\nRead tools.txt only for available tool names and schemas; it contains no factual source material. For current or recent information, use the listed web-search tool and answer from its results.`;
   const [first, ...rest] = messages;
 
   if (first?.role === "system" && typeof first.content === "string") {
     const sentinel = first.content.indexOf(TOOL_PROMPT_SENTINEL);
-    const callerPrompt =
+    const priorPrompt =
       sentinel >= 0
         ? first.content.slice(0, sentinel).trimEnd()
         : first.content;
+    const callerPrompt = priorPrompt
+      .replace(/\n*\[relay-reasoning-prompt-v1\][\s\S]*$/, "")
+      .trimEnd();
     return [
       {
         ...first,
@@ -526,6 +540,85 @@ function parseXmlToolCallBody(body: string): ParsedToolIntent | null {
   if (!jsonText) return null;
   const parsed = parseArgumentValue(jsonText);
   return parsed ? { name, arguments: parsed } : null;
+}
+
+function parseJsonToolIntents(text: string): ParsedToolIntent[] {
+  const intents: ParsedToolIntent[] = [];
+  const push = (name: unknown, args: unknown) => {
+    if (typeof name !== "string" || !name.trim()) return;
+    let argumentsValue: Record<string, unknown> | null = null;
+    if (args && typeof args === "object" && !Array.isArray(args)) {
+      argumentsValue = args as Record<string, unknown>;
+    } else if (typeof args === "string") {
+      argumentsValue = parseLooseJsonObject(args) ?? parseArgumentValue(args);
+    }
+    if (!argumentsValue) return;
+    intents.push({ name: name.trim(), arguments: argumentsValue });
+  };
+
+  const consider = (raw: string) => {
+    const trimmedRaw = raw.trim();
+    if (trimmedRaw.startsWith("[")) {
+      try {
+        const parsed: unknown = JSON.parse(trimmedRaw);
+        if (Array.isArray(parsed)) {
+          for (const item of parsed) {
+            if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+            const record = item as Record<string, unknown>;
+            const fn =
+              record.function &&
+              typeof record.function === "object" &&
+              !Array.isArray(record.function)
+                ? (record.function as Record<string, unknown>)
+                : record;
+            push(
+              fn.name ?? record.tool,
+              fn.arguments ??
+                fn.parameters ??
+                fn.params ??
+                record.arguments ??
+                record.params,
+            );
+          }
+        }
+      } catch {
+        return;
+      }
+      return;
+    }
+    const parsed = parseLooseJsonObject(trimmedRaw);
+    if (!parsed) return;
+    if (typeof parsed.tool === "string") {
+      push(parsed.tool, parsed.params ?? parsed.arguments ?? parsed.parameters);
+      return;
+    }
+    if (typeof parsed.name === "string") {
+      push(parsed.name, parsed.arguments ?? parsed.parameters ?? parsed.params);
+      return;
+    }
+    if (Array.isArray(parsed.tool_calls)) {
+      for (const item of parsed.tool_calls) {
+        if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+        const record = item as Record<string, unknown>;
+        const fn =
+          record.function &&
+          typeof record.function === "object" &&
+          !Array.isArray(record.function)
+            ? (record.function as Record<string, unknown>)
+            : record;
+        push(fn.name, fn.arguments ?? fn.parameters ?? fn.params);
+      }
+    }
+  };
+
+  // Fenced JSON blocks anywhere in the reply (common on continue turns).
+  for (const match of text.matchAll(/```(?:json|javascript|js)?\s*([\s\S]*?)```/gi)) {
+    consider(match[1] ?? "");
+  }
+  // Whole-reply JSON object/array fallbacks only — do not scan every brace in prose.
+  const trimmed = text.trim();
+  if (trimmed.startsWith("{") || trimmed.startsWith("[")) consider(trimmed);
+  return intents;
 }
 
 function parseXmlToolCalls(text: string): ParsedToolIntent[] {
@@ -696,6 +789,11 @@ export function stripToolCallMarkup(text: string): string {
         /(?:^|\n)\s*tool\s*[:=]\s*\S+[\s\S]*?\bparams\s*[:=][\s\S]*$/gi,
         "",
       )
+      // Second-turn models often emit Markdown JSON tool payloads instead of XML.
+      .replace(/```(?:json|javascript|js)?\s*([\s\S]*?)```/gi, (block, body) => {
+        const sample = String(body ?? "");
+        return /"(?:tool|name|tool_calls)"\s*:/.test(sample) ? "" : block;
+      })
       .trim()
   );
 }
@@ -706,13 +804,22 @@ export function gateToolCalls(
   tools?: OpenAITool[],
 ): ToolCallGateResult {
   const trimmed = normalizeToolPayload(text);
-  const intents = parseXmlToolCalls(trimmed);
+  const xmlIntents = [...trimmed.matchAll(/<TOOL_CALL>([\s\S]*?)<\/TOOL_CALL>/gi)]
+    .map((match) => parseXmlToolCallBody(match[1] ?? ""))
+    .filter((intent): intent is ParsedToolIntent => intent !== null);
+  const jsonFallback = xmlIntents.length === 0;
+  const intents = xmlIntents.length > 0 ? xmlIntents : parseJsonToolIntents(trimmed);
   const rejections = rejectBrokenToolMarkup(trimmed);
   const calls: ShimToolCall[] = [];
   for (const intent of intents) {
     const gated = toShimToolCall(intent, tools);
-    if (gated.call) calls.push(gated.call);
-    if (gated.rejection) rejections.push(gated.rejection);
+    if (gated.call) {
+      calls.push(gated.call);
+      continue;
+    }
+    // JSON prose in ordinary answers must not become a hard tool-gate failure.
+    // Only reject unknown/invalid names for explicit <TOOL_CALL> markup.
+    if (gated.rejection && !jsonFallback) rejections.push(gated.rejection);
   }
   if (
     tools?.length &&
@@ -754,12 +861,50 @@ export function toolCallRetrySignal(rejections: string[]): string {
   return [
     "Your previous tool call was rejected by the tool gate.",
     reasons,
-    "Retry now with exactly this shape:",
+    "Retry now with exactly this XML shape (no Markdown, no JSON fence, no prose plan):",
     "<TOOL_CALL>",
     "tool: tool_name",
     "params:",
     '{"param":"value with \\"quotes\\" and \\n newlines escaped"}',
     "</TOOL_CALL>",
-    "Rules: one complete block, valid JSON params, escape quotes/newlines inside strings, then close </TOOL_CALL>. Or answer without a tool if none is needed.",
+    "Rules: one or more complete <TOOL_CALL> blocks, valid JSON params, escape quotes/newlines inside strings, then close each </TOOL_CALL>. If the task still needs a tool, you MUST emit XML now.",
   ].join("\n");
+}
+
+/** Continue-turn nudge when the model skipped tools or emitted non-XML tool prose. */
+export function missingToolCallRetrySignal(tools: OpenAITool[]): string {
+  const names = tools.map((tool) => tool.function.name).slice(0, 24).join(", ");
+  return [
+    "A tool is still required to advance the user's task.",
+    "Do not answer yet. Do not narrate a plan. Do not use a Markdown JSON code fence.",
+    "Emit one or more <TOOL_CALL> XML blocks now using only listed tools:",
+    names || "(none)",
+    "Exact shape:",
+    "<TOOL_CALL>",
+    "tool: tool_name",
+    "params:",
+    '{"param":"value"}',
+    "</TOOL_CALL>",
+  ].join("\n");
+}
+
+/** True when the reply looks like a tool attempt that was not valid XML. */
+export function looksLikeNonXmlToolAttempt(text: string): boolean {
+  const sample = text.trim();
+  if (!sample) return false;
+  // Valid or broken XML is handled by the gate/rejections path.
+  if (/<TOOL_CALL\b/i.test(sample)) return false;
+  if (
+    /```(?:json|javascript|js)?\b/i.test(sample) &&
+    /"(?:tool|name|tool_calls)"\s*:/.test(sample)
+  )
+    return true;
+  if (/^\s*\{[\s\S]*"(?:tool|name|tool_calls)"\s*:/i.test(sample)) return true;
+  if (
+    /\b(?:i(?:['’]ll| will)|let me)\b[\s\S]{0,120}\b(?:call|use|run|invoke|create|write|edit|search|fetch|open)\b/i.test(
+      sample,
+    )
+  )
+    return true;
+  return false;
 }
